@@ -337,6 +337,7 @@ mod tests {
         CalculatedChannel {
             info: ChannelInfo { name: name.to_string(), ..Default::default() },
             inputs,
+            parameters: BTreeMap::new(),
             equation: "v * 2".to_string(),
         }
     }

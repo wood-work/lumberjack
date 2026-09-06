@@ -124,8 +124,11 @@ pub enum Error {
     #[error("the equation for '{channel}' could not be read: {reason}. Equation: {equation}")]
     InvalidEquation { channel: String, equation: String, reason: String },
 
-    #[error("the equation for '{channel}' uses '{variable}', which is not one of its inputs. Declared: {declared}")]
+    #[error("the equation for '{channel}' uses '{variable}', which is not one of its inputs or constants. Declared: {declared}")]
     UnknownEquationInput { channel: String, variable: String, declared: String },
+
+    #[error("'{name}' is both an input and a constant of '{channel}', so there is no saying which the equation means. Rename one of them")]
+    EquationNameUsedTwice { channel: String, name: String },
 
     #[error("the equation for '{channel}' has no inputs, so it can never be worked out")]
     EquationHasNoInput { channel: String },

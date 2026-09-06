@@ -80,6 +80,17 @@ pub struct CalculatedChannel {
     #[serde(flatten)]
     pub info: ChannelInfo,
     pub inputs: BTreeMap<String, ChannelRef>,
+    /// Fixed numbers the equation may use, alongside the inputs.
+    ///
+    /// The same reasoning as a scale's parameters: written into the arithmetic,
+    /// `x / 120` gives no hint that 120 is a shunt resistor, and refitting a
+    /// hundred ohm one means working the equation out again. Named, they stay
+    /// editable and a saved project says what they were.
+    ///
+    /// Defaulted and left out when empty, so a channel without any is written
+    /// exactly as it was before this existed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: BTreeMap<String, f64>,
     pub equation: String,
 }
 
@@ -110,6 +121,12 @@ struct Compiled {
     expression: Expression,
     /// Every input, as (variable name, the channel it reads).
     inputs: Vec<(String, ChannelRef)>,
+    /// The constants, ready to be handed to the equation with the inputs.
+    ///
+    /// Held as the pairs `evaluate` wants rather than as the map they were
+    /// written in, since they are the same on every sample and rebuilding them
+    /// per reading would be work for nothing.
+    parameters: Vec<(String, f64)>,
     /// Which input drives the output: the slowest, once the rates are known.
     ///
     /// Not knowable when built if an input is on a device whose rate has to be
@@ -313,7 +330,9 @@ impl Calculator {
         let mut first_failure: Option<String> = None;
 
         while let Some(sample) = self.compiled[index].pending.front().copied() {
-            let mut values: Vec<(String, f64)> = Vec::new();
+            // The constants first, being the same every time. The inputs that
+            // follow cannot collide with them: `compile` refused that.
+            let mut values: Vec<(String, f64)> = self.compiled[index].parameters.clone();
             let mut ready = true;
             let mut unavailable = false;
 
@@ -455,27 +474,46 @@ fn compile(channel: &CalculatedChannel) -> Result<Compiled> {
         }
     })?;
 
+    // One name cannot mean two things. Both are bound before the equation is
+    // evaluated, so whichever were bound last would silently win, and which
+    // that is is an accident of the order they happen to be pushed in.
+    if let Some(name) = channel.parameters.keys().find(|name| channel.inputs.contains_key(*name)) {
+        return Err(Error::EquationNameUsedTwice {
+            channel: channel.info.name.clone(),
+            name: name.clone(),
+        });
+    }
+
     // An equation using a name that was never declared would otherwise fail on
     // every sample at run time, having looked fine in the config.
+    let known: Vec<String> =
+        channel.inputs.keys().chain(channel.parameters.keys()).cloned().collect();
+
     for used in expression.variables() {
-        if !channel.inputs.contains_key(&used) {
+        if !known.contains(&used) {
             return Err(Error::UnknownEquationInput {
                 channel: channel.info.name.clone(),
                 variable: used,
-                declared: channel.inputs.keys().cloned().collect::<Vec<_>>().join(", "),
+                declared: known.join(", "),
             });
         }
     }
 
+    // Constants alone are not enough. Nothing about them changes, so there
+    // would be no reading to work out and no moment to work it out at: an
+    // input is what a calculated channel is driven by.
     if channel.inputs.is_empty() {
         return Err(Error::EquationHasNoInput { channel: channel.info.name.clone() });
     }
 
     // Nothing is known about the inputs until data arrives, so 1 stands in.
+    // The constants are known now, though, and trying the equation with the
+    // real ones is a truer rehearsal than a stand-in would be.
     let declared: Vec<(String, f64)> = channel
         .inputs
         .keys()
         .map(|variable| (variable.clone(), 1.0))
+        .chain(channel.parameters.iter().map(|(name, value)| (name.clone(), *value)))
         .collect();
     expression.check(&declared).map_err(|reason| Error::InvalidEquation {
         channel: channel.info.name.clone(),
@@ -490,6 +528,11 @@ fn compile(channel: &CalculatedChannel) -> Result<Compiled> {
             .inputs
             .iter()
             .map(|(variable, source)| (variable.clone(), source.clone()))
+            .collect(),
+        parameters: channel
+            .parameters
+            .iter()
+            .map(|(name, value)| (name.clone(), *value))
             .collect(),
         trigger: None,
         pending: VecDeque::new(),
@@ -516,6 +559,7 @@ mod tests {
                     )
                 })
                 .collect(),
+            parameters: BTreeMap::new(),
             equation: equation.to_string(),
         }
     }
@@ -584,6 +628,101 @@ mod tests {
     }
 
     // -- one input -----------------------------------------------------------
+
+    /// The same, with named constants alongside the inputs.
+    fn with_constants(
+        name: &str,
+        equation: &str,
+        inputs: &[(&str, &str, &str)],
+        constants: &[(&str, f64)],
+    ) -> CalculatedChannel {
+        let mut built = channel(name, equation, inputs);
+        built.parameters =
+            constants.iter().map(|(name, value)| (name.to_string(), *value)).collect();
+        built
+    }
+
+    #[test]
+    fn an_equation_may_read_a_constant_beside_its_inputs() {
+        let channel = with_constants(
+            "Flow",
+            "(v - offset) * gain",
+            &[("v", "Rig", "Raw")],
+            &[("offset", 4.0), ("gain", 2.0)],
+        );
+
+        assert!(channel.validate().is_ok(), "{:?}", channel.validate().err().map(|e| e.to_string()));
+    }
+
+    #[test]
+    fn a_constant_is_checked_at_its_real_value_rather_than_a_stand_in() {
+        // An input stands in as 1 because nothing is known about it yet. A
+        // constant is known now, so the rehearsal uses it — and this one makes
+        // the equation undefined, which is a property of the number rather
+        // than of the equation and so is not a fault.
+        let channel = with_constants("Flow", "v / gap", &[("v", "Rig", "Raw")], &[("gap", 0.0)]);
+
+        assert!(channel.validate().is_ok(), "dividing by a constant zero is the data's problem");
+    }
+
+    #[test]
+    fn one_name_cannot_be_both_an_input_and_a_constant() {
+        // Both are bound before the equation runs, so whichever were bound
+        // last would quietly win.
+        let channel =
+            with_constants("Flow", "v * 2", &[("v", "Rig", "Raw")], &[("v", 3.0)]);
+
+        let error = channel.validate().expect_err("that should be refused");
+        assert!(matches!(error, Error::EquationNameUsedTwice { .. }), "{}", error);
+        assert!(error.to_string().contains("Rename one of them"), "{}", error);
+    }
+
+    #[test]
+    fn constants_alone_are_not_enough_to_drive_a_channel() {
+        // Nothing about a constant changes, so there is no reading to work out
+        // and no moment to work it out at.
+        let channel = with_constants("Flow", "gain * 2", &[], &[("gain", 2.0)]);
+
+        assert!(matches!(
+            channel.validate().expect_err("that should be refused"),
+            Error::EquationHasNoInput { .. }
+        ));
+    }
+
+    #[test]
+    fn a_name_that_is_neither_an_input_nor_a_constant_is_named_with_what_is() {
+        let channel =
+            with_constants("Flow", "v * gian", &[("v", "Rig", "Raw")], &[("gain", 2.0)]);
+
+        let error = channel.validate().expect_err("a typo should be refused");
+        let said = error.to_string();
+        assert!(said.contains("gian"), "{}", said);
+        // Both lists, since either would have been a fine place to declare it.
+        assert!(said.contains("v") && said.contains("gain"), "{}", said);
+    }
+
+    /// The one that matters: a constant that validates but never reaches the
+    /// arithmetic would pass every check above and quietly produce the wrong
+    /// number for the whole of a run.
+    #[test]
+    fn a_constant_reaches_the_arithmetic_and_not_only_the_checks() {
+        let mut calc = calculator_with(
+            vec![with_constants(
+                "Pressure",
+                "(v - offset) * gain",
+                &[("v", "ADC-20", "Input 1")],
+                &[("offset", 0.5), ("gain", 12.5)],
+            )],
+            &[("ADC-20", "Input 1", 10)],
+        );
+
+        let produced = calc.apply(&batch("ADC-20", "Input 1", &[0.5, 1.0, 2.0]), &mut ignore);
+
+        // The same numbers as the equation written out longhand, which is the
+        // point: naming the constants changes what a person can edit, and
+        // nothing about what is recorded.
+        assert_eq!(values(&produced[0]), vec![0.0, 6.25, 18.75]);
+    }
 
     #[test]
     fn an_equation_is_applied_to_every_sample() {

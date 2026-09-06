@@ -88,6 +88,7 @@ fn proposed(equation: &str, variable: &str, source: ChannelRef) -> CalculatedCha
         scale: None,
         },
         inputs: inputs,
+        parameters: BTreeMap::new(),
         equation: equation.to_string(),
     }
 }

@@ -43,6 +43,7 @@ use lumberdaq::hardware::{pico_hrdl, serial_stream};
 use lumberdaq::hardware::HardwareConfig;
 use lumberdaq::plot_config::{self, PlotLayout, SplitAxis};
 use lumberdaq::project::Project;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver};
@@ -2666,6 +2667,7 @@ impl AppDaq {
                         scale: None,
                     },
                     inputs: std::collections::BTreeMap::new(),
+                    parameters: BTreeMap::new(),
                     equation: String::new(),
                 });
 
@@ -6900,6 +6902,7 @@ mod tests {
                             ..Default::default()
                         },
                         inputs: inputs.clone(),
+                        parameters: BTreeMap::new(),
                         equation: equation.to_string(),
                     })
                     .collect(),
