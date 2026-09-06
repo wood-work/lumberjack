@@ -1,5 +1,5 @@
 # Lumberdaq
-Rust library for data aquisition
+Rust library for data acquisition. 
 
 ## Install
 
@@ -124,7 +124,69 @@ rather than being taken for the first and never written.
 **Export a run that is still recording and you get it as far as it had got, and
 it is skipped from then on.** Stop the recording first, or delete the file.
 
+### Reading the results back
+
+`Archive` opens `results.db` read only and walks it: which runs it holds, which
+devices were in each, which channels on each device, and the readings
+themselves.
+
+```rust
+let archive = Archive::open(&project.database_path())?;
+for run in archive.runs()? {
+    for device in archive.devices(run.id)? {
+        for channel in archive.channels(device.id)? {
+            let points = archive.readings(channel.id)?;
+        }
+    }
+}
+```
+
+`reading_count` answers how many there are without fetching them, which is what
+a tree of runs wants before somebody has asked to see one.
+
+Read only, deliberately: whatever is looking through old results must not be
+able to damage them, and a run may be recording into the same file while this
+reads it.
+
+Results files carry a schema version. This one writes version 6 and reads back
+to version 2, so a file from an older lumberdaq opens for inspection and export
+while a *new run* wants a file of the current version. Recording into an older
+file is refused rather than migrated.
+
 ## Creating a project
+
+### Taking devices from another project
+
+`DaqConfig::merge` copies the devices and calculated channels out of another
+configuration and leaves the rest of it behind, which is what makes a file of
+devices usable as a library to add to whatever is being set up.
+
+```rust
+let library = read_configuration_file(&path)?;
+let report = config.merge(library);        // report.devices, .calculated, .skipped
+```
+
+The configuration being merged into wins every disagreement. A device whose
+name is already there is left alone entirely rather than merged into, because a
+channel's binding — which field of a serial frame, which input of a Pico — only
+means something beside the hardware settings it was written against. Nothing is
+renamed and nothing is overwritten, so merging the same file twice does nothing
+the second time.
+
+A calculated channel whose inputs are not present is left behind too, and said
+so. It would otherwise load, run, and silently produce nothing, the trigger it
+waits on never arriving.
+
+### Devices that would fight over one port
+
+`DaqConfig::address_clashes` finds devices pointed at hardware another device
+has already claimed — the same serial port, or the same NI MAX device name.
+Checked over the whole configuration rather than as one is chosen, since a file
+loaded from disk or merged from a library can arrive with a port named twice.
+
+Worth asking before a run. Otherwise the first device opens the port, the
+operating system refuses the second, and it is reported as access being denied,
+which sends somebody to look at a cable when the fault is in the setup.
 
 `build_config` defines a rig in Rust and writes it out as a config. That is a
 convenience for producing something to test against, not how a setup is normally
@@ -145,6 +207,12 @@ let mut daq = lumberdaq::open("my_project")?;   // reads config, attaches the si
 let report = daq.connect();                      // which devices came up
 daq.run(&stop, &mut on_event)?;                  // records until `stop` is set
 ```
+
+Events reaching the callback are `Connected`, `Disconnected`, `Problem` and
+`Concern` — the last being something wrong that is not bad enough to fail a
+read, such as serial frames being skipped or a stream that does not look like
+the configuration says. It is sent when it starts and when it clears, not every
+cycle, and `Hardware::concern` answers the current state at any moment.
 
 `connect` and `run` are separate so a program can decide for itself what a partly
 connected rig means, and can show what happens while a run is going. `run` blocks
@@ -304,11 +372,17 @@ Setups under `test_projects/`, each showing one thing:
 
 | | needs hardware | shows |
 |---|---|---|
-| `scaled` | no | scaled channels, recording the sensor's units rather than volts, with and without named constants |
 | `mock_sine` | no | streaming with nothing plugged in. Two sine channels sampled at 100 Hz, collected far more slowly. The values can be checked against the wave they claim to be. |
+| `scaled` | no | scaled channels, recording the sensor's units rather than volts, with and without named constants |
+| `calculated` | no | a calculated channel over one device: a scaled value and a squared one |
+| `twin` | no | two devices at the same rate, which still sample at different moments |
+| `mixed_rate` | no | 1 Hz beside 10 Hz, which is what pairing by nearest sample is for |
+| `differential` | no | calculated channels across devices at 50 ms and 500 ms, driven by the slower |
 | `simulated_and_serial_devices` | a serial device on COM3 | a mock and a real device in one run, at different rates, on their own threads |
 | `pico_adc20` | ADC-20 or ADC-24 | polled acquisition, where `read_interval_ms` is the sample rate |
 | `pico_adc20_stream` | ADC-20 or ADC-24 | the same unit told to scan itself, so samples carry the unit's own timestamps |
+| `pico_differential` | ADC-20 or ADC-24 | inputs paired against the one above, and what that costs |
+| `ni_usb6001` | NI USB-6001 | a DAQmx device addressed by its MAX name |
 
 `mock_sine` is the one to run first, since it needs nothing attached:
 
@@ -399,6 +473,75 @@ which for a multiplication or an offset it always can.
 
 `test_projects/scaled` shows both forms with an unscaled channel beside them for
 comparison. It needs no hardware.
+
+## Serial devices
+
+A device sending readings over a serial port, in frames this end has to find in
+the stream. Both what a frame *is* and where each channel sits inside it are
+configuration, because neither can be guessed.
+
+```json
+{
+  "type": "SerialStream",
+  "port": "COM3",
+  "baudrate": 115200,
+  "frame_pattern": "#([^#$]*)\\$",
+  "channels": [
+    { "name": "Flow", "unit": "L/min", "index": 1 },
+    { "name": "Pressure", "unit": "bar", "index": 2 }
+  ]
+}
+```
+
+`frame_pattern` is a regular expression matching one complete frame. It both
+finds the boundaries and strips whatever wraps the data: a capture group is the
+data if there is one, otherwise the whole match. The default above reads
+`#1,14.5,7.25$`; a device that simply sends lines wants `([^\r\n]+)\r?\n`
+instead.
+
+The expression **must require whatever ends a frame**. That is what says a
+frame has fully arrived rather than being half way through the wire, and a
+pattern that can match without its terminator, such as `(.*)`, will happily
+match a partial frame and hand back truncated data.
+
+`index` is which comma separated field of the frame a channel reads, counting
+from zero.
+
+Anything between frames is discarded, so a board that also prints status lines
+costs nothing — provided the pattern cannot match one. That is worth thinking
+about with a line based pattern, which by definition matches every line
+including `ERROR: sensor timeout`; a pattern describing the shape of the data,
+such as `^(\d+(?:,-?[\d.]+)+)\r?\n`, will not.
+
+A frame that matches but that the channels cannot read is skipped and reported
+rather than failing the batch around it, so one status line does not punch a
+hole in a recording.
+
+### Finding out whether the settings read the device
+
+A baud rate cannot be worked out by asking, only by listening.
+`serial_stream::check_stream` opens the port for a moment and says which of four
+things happened: it reads, bytes arrive but nothing matches the pattern, frames
+match but the channels cannot read them, or nothing arrives at all.
+
+```rust
+match check_stream(&serial_config, Duration::from_secs(5))? {
+    StreamCheck::Reads => {}
+    StreamCheck::Unreadable => {}   // very probably the baud rate
+    StreamCheck::Mismatched { reason } => {}
+    StreamCheck::Silent => {}
+}
+```
+
+Frames are weighed against everything else that arrived before the channels get
+the blame. At the right rate a stream is almost entirely frames; at the wrong
+one, noise throws up the occasional accidental match — `#` and `$` each turn up
+about once in every 256 random bytes — and treating one of those as proof the
+rate was right is how a wrong rate escapes without a warning.
+
+Give it several seconds. Opening a port asserts DTR, which resets an Arduino,
+and its bootloader is silent for a second or two; a shorter wait hears only the
+silence it caused and blames the baud rate for it.
 
 ## National Instruments
 

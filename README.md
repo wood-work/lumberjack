@@ -6,27 +6,51 @@
 
 </div>
 
-Work in progress. Do not use.
+Data acquisition software for physical data logging devices. Package contains a rust library `lumberdaq`, terminal user interface for logging and data visualisation only, and a graphical user interface that can be used for full configuration, data logging and visualisation as well as loading and inspection of data records.
 
-Data aquisition software.
+# Features
 
-# Layout
+Features include:
+- Data logging simultaneously from multiple devices
+- Live graphical data visualisation with configurable plot layout
+- SQLite data format plus export to tabulated csv
+- Calculations on channels using user defined formulas
+- Calculated device allowing calculated channels from multiple devices
+- Device and plot configurations saved and loaded via simple human readable json files 
+
+# Hardware
+
+Current hardware supported:
+- Pico Technology ADC-20 & ADC-24
+- NI USB-6001
+- USB serial devices sending delimited frames, described by a regular expression
+
+Mock devices are available for testing.
+
+# Package Layout
 A Cargo workspace over the Rust crates, so they share one `target/` directory
 and one `Cargo.lock`.
 
 * `lumberdaq/` — the data acquisition library and its CLI. The active work.
-* `picolog/` — safe wrappers over the Pico Technology driver, used by lumberdaq.
 * `choptui/` — terminal monitor for a run. A separate crate on purpose: it can
   only reach lumberdaq's public API, so a missing export fails to compile here.
 * `lumbergui/` — the iced interface. The direction the GUI is taking.
+* `picolog/` — safe wrappers over the Pico Technology driver, used by lumberdaq.
+* `nidaqmx/` — safe wrappers over the NI DAQmx driver, used by lumberdaq.
 * `sandbox/` — throwaway experiments, kept out of the library's dependencies.
 
 `sandbox/` stands outside the workspace and keeps its own dependencies.
+`assets/` holds the marks and the font, kept beside the project rather than
+inside the interface that draws them, so the same logo serves this page.
 
-# Hardware
-Pico Technology and other open DAQ hardware, plus devices streaming over serial.
-National Instruments is supported as a legacy option, because we still own
-USB-6001 hardware and still have to read it. It is not the direction.
+## Platform
+
+Windows, in practice. Both drivers are DLLs, the interface is built with a
+Windows icon and a statically linked C runtime, and device arrival and removal
+are heard through a Windows message-only window. Everything else is portable
+Rust and the acquisition loop has nothing platform specific in it, so a port is
+a question of the driver loading and one notification path rather than a
+rewrite. Nobody has tried it.
 
 ## Drivers
 
@@ -37,32 +61,29 @@ rather than linked. So the workspace compiles on a machine with none of it
 installed, and a driver that is not there fails when a device is opened, saying
 what it looked for.
 
-| you are | to build | to read that hardware | to regenerate bindings |
+| Devices | To build | To read that hardware | To regenerate bindings |
 |---|---|---|---|
-| using no DAQ hardware | nothing | — | — |
-| reading a Pico ADC-20/24 | nothing | PicoSDK runtime (`picohrdl.dll`) | PicoSDK headers, LLVM |
-| reading an NI USB-6001 | nothing | NI-DAQmx runtime (`nicaiu.dll`) | NI-DAQmx Support for C, LLVM |
+| Mock hardware | Nothing | — | — |
+| Pico ADC-20/24 | Nothing | PicoSDK runtime (`picohrdl.dll`) | PicoSDK headers, LLVM |
+| NI USB-6001 | Nothing | NI-DAQmx runtime (`nicaiu.dll`) | NI-DAQmx Support for C, LLVM |
 
 Only whoever regenerates bindings needs a header and a working bindgen, and that
 is done once per driver, not once per build.
 
+### Installing Pico
+Download and run the [PicoSDK](https://www.picotech.com/downloads/sdk-release/pico-software-development-kit-64bit).
+
+
 ### Installing NI-DAQmx
 
-*NI support is being added; this is what it will want.*
+Download and run the [DAQmx installer](https://www.ni.com/en/support/downloads/drivers/download.ni-daq-mx.html). The installer offers a number of options but only the following are required:
 
-The installer offers a long list of extras. Two matter:
-
-| tick | why |
+| Option | Why |
 |---|---|
 | **NI-DAQmx Runtime with Configuration Support** | the driver itself, plus MAX for seeing and naming devices |
 | **NI-DAQmx Support for C** | `NIDAQmx.h`, and only for regenerating bindings |
 
-Untick the rest. **.NET Framework 4.0 and 4.5 support** are for a language we do
-not use; **NI Linux RT System Image**, **Web-Based Configuration and
-Monitoring** and **cDAQ Firmware** are for hardware a USB-6001 is not. **NI
-Certificates** only suppresses Windows security prompts during installation, and
-**NI Hardware Manager** duplicates what MAX already does. **NI I/O Trace** logs
-every DAQmx call and is worth having only while working on the bindings.
+
 
 If you are only *running* lumberdaq against a 6001, the runtime alone is enough:
 Support for C is a build-time convenience for this repository, not a dependency
@@ -70,26 +91,43 @@ of the program.
 
 DAQmx addresses channels by device name, as in `Dev1/ai0`, so a device needs a
 name before it can be read. MAX assigns one when the hardware is plugged in, and
-will also create a **simulated** device, which is enough to develop against with
+will also create a **simulated** device, which is enough to develop and test against with
 nothing attached.
 
 
-# Run Development
+# Running
+
+Each interface takes a project directory — a folder holding `config.json` — and
+with no argument uses the current one. `mock_sine` and `scaled` need no hardware
+attached, so either is a good first run.
+
+The graphical interface, which is the one that can also *edit* a setup:
+
 ```ps
-cd .\lumberdaq\
-cargo run
+cargo run -p lumbergui -- lumberdaq/test_projects/scaled
 ```
 
-Or from the repository root, for any one crate:
+The command line recorder, and the terminal monitor:
 
 ```ps
 cargo run -p lumberdaq -- lumberdaq/test_projects/scaled
-cargo test --workspace
+cargo run -p choptui   -- lumberdaq/test_projects/scaled
 ```
 
-The Tauri prototype:
+Other test projects are available; `lumberdaq/README.md` lists what each shows.
+
+# Development
 
 ```ps
-cd .\app\src-tauri\
-cargo tauri dev
+cargo test --workspace
+cargo clippy --workspace --all-targets
 ```
+
+A release build puts the interface at `target/release/lumbergui.exe`, which runs
+on its own — the C runtime is linked statically, so there is no redistributable
+to install alongside it. It still needs the vendor driver for whichever hardware
+a project actually uses.
+
+# Licence
+
+MIT. See [LICENSE](LICENSE).
