@@ -15,7 +15,7 @@ use iced::widget::markdown;
 use iced::widget::pane_grid::{self, Axis, Configuration, PaneGrid};
 use iced::widget::{
     button, checkbox, column, container, opaque, pick_list, row, scrollable, slider, space,
-    stack, text, text_input, MouseArea, Row,
+    stack, text, text_input, toggler, MouseArea, Row,
 };
 use iced::window;
 
@@ -193,11 +193,17 @@ fn devices_from(config: &DaqConfig) -> Vec<AppDevice> {
             .into_iter()
             .map(|channel| AppChannel {
                 name: channel.name,
+                // A channel on a device that is switched off is switched off
+                // as far as anything here is concerned: it produces nothing
+                // either way, and showing it in full while the device above it
+                // is greyed would be drawing a distinction with no difference.
+                enabled: device.enabled && channel.enabled,
                 unit: channel.unit,
                 latest: None,
                 samples: 0,
             })
             .collect(),
+        enabled: device.enabled,
         // Open to begin with. A tree that has to be opened before it says
         // anything hides the thing somebody came to look at, and a rig has few
         // enough devices that showing them all is no worse than showing none.
@@ -218,11 +224,18 @@ fn devices_from(config: &DaqConfig) -> Vec<AppDevice> {
             .iter()
             .map(|channel| AppChannel {
                 name: channel.info.name.clone(),
+                // Asked of the library rather than worked out again here, so
+                // what is drawn faded is exactly what the run will ignore.
+                enabled: config.calculated_is_enabled(channel),
                 unit: channel.info.unit.clone(),
                 latest: None,
                 samples: 0,
             })
             .collect(),
+        // Nothing to switch off. The calculated device is not a device in the
+        // config - it has no settings of its own beyond a name - so its
+        // channels are switched off one at a time.
+        enabled: true,
         expanded: true,
         kind: DeviceKind::Calculated,
         connected: calculated_health(config),
@@ -554,6 +567,10 @@ pub fn main() -> iced::Result {
 struct AppChannel {
     name: String,
     unit: String,
+    /// Whether it is being read. For a calculated channel this includes
+    /// whether what it reads is being read, since it is only ever as
+    /// available as its inputs.
+    enabled: bool,
     /// The most recent value acquired, once any has been.
     latest: Option<f64>,
     samples: usize,
@@ -568,6 +585,8 @@ struct AppDevice {
     /// `None` before a run: not knowing is a third state, and drawing a red
     /// dot for it would say the device is broken when nothing has looked.
     connected: Option<bool>,
+    /// Whether this device is used at all.
+    enabled: bool,
     /// What it is complaining about, if anything.
     ///
     /// Set from two places: a run, where the device says so as it reads, and
@@ -1103,7 +1122,7 @@ impl ContextMenu {
 /// What is being configured in the settings panel.
 ///
 /// Only plots so far; devices and channels are the same idea and will join it.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Selection {
     Plot(usize),
     /// The settings that apply to every plot rather than to one of them.
@@ -1566,6 +1585,15 @@ enum Message {
     CalculatedConstantRenamed(usize, String, String),
     CalculatedConstantValueEdited(usize, String, String),
     CalculatedConstantDeleted(usize, String),
+    /// Switch a device or channel on or off.
+    ///
+    /// The target is carried rather than taken from the selection, because the
+    /// right click menu acts on the row that was clicked and that is not
+    /// necessarily the row on show. `Selection` is reused for it: its three
+    /// relevant shapes are exactly the three things that can be switched.
+    EnabledSet(Selection, bool),
+    /// Switch every channel of a device back on.
+    AllChannelsEnabled(Selection),
     ScaleParameterAdded(usize, usize),
     ScaleParameterRenamed(usize, usize, String, String),
     ScaleParameterValueEdited(usize, usize, String, String),
@@ -2214,6 +2242,9 @@ impl AppDaq {
                     self.devices.push(AppDevice {
                         name,
                         channels: Vec::new(),
+                        // Newly made, so switched on: nobody adds a device in
+                        // order to leave it off.
+                        enabled: true,
                         expanded: false,
                         kind: DeviceKind::Calculated,
                         connected: None,
@@ -2259,6 +2290,7 @@ impl AppDaq {
                     AppDevice {
                         name,
                         channels: Vec::new(),
+                        enabled: true,
                         expanded: false,
                         kind: DeviceKind::Measured(at),
                         connected: None,
@@ -2744,6 +2776,7 @@ impl AppDaq {
                     device.channels.push(AppChannel {
                         name: added.name,
                         unit: added.unit,
+                        enabled: true,
                         latest: None,
                         samples: 0,
                     });
@@ -2921,6 +2954,7 @@ impl AppDaq {
                         app_device.channels.push(AppChannel {
                             name,
                             unit,
+                            enabled: true,
                             latest: None,
                             samples: 0,
                         });
@@ -3243,6 +3277,57 @@ impl AppDaq {
 
                 channel.parameters.remove(&name);
                 self.parameter_draft = None;
+                self.rig_changed();
+            }
+            Message::EnabledSet(what, on) => {
+                self.context = None;
+                match what {
+                    Selection::Device(index) => {
+                        let Some(device) = self.config.devices.get_mut(index) else { return };
+                        device.enabled = on;
+                    }
+                    Selection::Channel(device, channel) => {
+                        let Some(info) = self.channel_info_mut(device, channel) else { return };
+                        info.enabled = on;
+                    }
+                    Selection::CalculatedChannel(at) => {
+                        let Some(calculated) = self.config.calculated.as_mut() else { return };
+                        let Some(channel) = calculated.channels.get_mut(at) else { return };
+                        channel.info.enabled = on;
+                    }
+                    _ => return,
+                }
+
+                // The tree carries the flag on every row, and a device
+                // switching off takes its channels' appearance with it, so
+                // this is a rebuild rather than one row changing.
+                self.reload_devices();
+                self.rig_changed();
+            }
+            Message::AllChannelsEnabled(what) => {
+                self.context = None;
+                match what {
+                    Selection::Device(index) => {
+                        let Some(device) = self.config.devices.get_mut(index) else { return };
+                        // By position, there being no `channel_infos_mut`:
+                        // the library hands out clones for reading and one
+                        // channel at a time for writing.
+                        for position in 0..device.hardware.channel_infos().len() {
+                            if let Some(channel) = device.hardware.channel_info_mut(position) {
+                                channel.enabled = true;
+                            }
+                        }
+                    }
+                    Selection::Calculated => {
+                        let Some(calculated) = self.config.calculated.as_mut() else { return };
+                        for channel in calculated.channels.iter_mut() {
+                            channel.info.enabled = true;
+                        }
+                    }
+                    _ => return,
+                }
+
+                self.reload_devices();
                 self.rig_changed();
             }
             Message::ScaleParameterAdded(device, channel) => {
@@ -3996,7 +4081,13 @@ impl AppDaq {
         // show up there too. Every edit to the rig comes through here, which
         // is what makes this the one place it needs doing.
         self.available = self.config.available_inputs();
-        self.plottable = self.config.all_channels();
+        // Switched off channels are left out of what a plot can be given.
+        // They produce nothing, so a line for one would be an empty promise;
+        // a plot that already names one is left alone rather than refused,
+        // which is what happens anyway, since it simply receives no data.
+        let off = self.config.disabled_inputs();
+        self.plottable =
+            self.config.all_channels().into_iter().filter(|c| !off.contains(c)).collect();
         self.rig_dirty_since = Some(Instant::now());
 
         // Judged here rather than while drawing. Compiling every equation is
@@ -5231,22 +5322,40 @@ impl AppDaq {
         };
 
         context_menu(match target {
-            ContextMenu::Device(index) => tree_top(vec![
-                ("Add channel", when(editable, Message::ChannelAdded(index))),
-                ("Delete device", when(editable, Message::DeviceDeleted(index))),
-            ]),
-            ContextMenu::Channel(device, channel) => tree_top(vec![
-                ("Add to plot", Some(Message::PlotMenuOpened)),
-                ("Delete channel", when(editable, Message::ChannelDeleted(device, channel))),
-            ]),
-            ContextMenu::Calculated => tree_top(vec![
-                ("Add channel", when(editable, Message::CalculatedChannelAdded)),
-                ("Delete device", when(editable, Message::CalculatedDeleted)),
-            ]),
-            ContextMenu::CalculatedChannel(channel) => tree_top(vec![
-                ("Add to plot", Some(Message::PlotMenuOpened)),
-                ("Delete channel", when(editable, Message::CalculatedChannelDeleted(channel))),
-            ]),
+            ContextMenu::Device(index) => tree_top(
+                [("Add channel", when(editable, Message::ChannelAdded(index)))]
+                    .into_iter()
+                    .chain(self.switching_entries(Selection::Device(index)))
+                    .chain([("Delete device", when(editable, Message::DeviceDeleted(index)))])
+                    .collect(),
+            ),
+            ContextMenu::Channel(device, channel) => tree_top(
+                [("Add to plot", Some(Message::PlotMenuOpened))]
+                    .into_iter()
+                    .chain(self.switching_entries(Selection::Channel(device, channel)))
+                    .chain([(
+                        "Delete channel",
+                        when(editable, Message::ChannelDeleted(device, channel)),
+                    )])
+                    .collect(),
+            ),
+            ContextMenu::Calculated => tree_top(
+                [("Add channel", when(editable, Message::CalculatedChannelAdded))]
+                    .into_iter()
+                    .chain(self.switching_entries(Selection::Calculated))
+                    .chain([("Delete device", when(editable, Message::CalculatedDeleted))])
+                    .collect(),
+            ),
+            ContextMenu::CalculatedChannel(channel) => tree_top(
+                [("Add to plot", Some(Message::PlotMenuOpened))]
+                    .into_iter()
+                    .chain(self.switching_entries(Selection::CalculatedChannel(channel)))
+                    .chain([(
+                        "Delete channel",
+                        when(editable, Message::CalculatedChannelDeleted(channel)),
+                    )])
+                    .collect(),
+            ),
             ContextMenu::RunChannel(..) => {
                 tree_top(vec![("Add to plot", Some(Message::PlotMenuOpened))])
             }
@@ -6419,9 +6528,14 @@ impl AppDaq {
                 let device_header = row![
                     chevron,
                     button(text(&device.name))
-                        .style(match selected {
-                            true => button::primary,
-                            false => button::text,
+                        .style(match (selected, device.enabled) {
+                            (true, _) => button::primary,
+                            // Dimmed rather than hidden. A device that is
+                            // switched off is still part of the setup, and
+                            // what somebody wants to see is that it is there
+                            // and not in use.
+                            (false, true) => button::text,
+                            (false, false) => faded_button,
                         })
                         .padding(4)
                         .on_press(press),
@@ -6524,6 +6638,7 @@ impl AppDaq {
                                     .spacing(8)
                                     .align_y(Center)
                                 .into();
+                                let row = faded(row, device.enabled && channel.enabled);
 
                                 let on_right = match device.kind {
                                     DeviceKind::Measured(at) => {
@@ -6636,6 +6751,97 @@ impl AppDaq {
         self.parameter_draft = None;
     }
 
+    /// Whether what is selected is switched on, where that can be changed.
+    ///
+    /// `None` for everything else: a plot, the calculated device, and anything
+    /// read back out of a recording have nothing to switch. The calculated
+    /// device is the surprising one - it has no settings of its own in the
+    /// config, so there is nowhere to record the answer, and its channels are
+    /// switched off one at a time instead.
+    fn enabling_selected(&self) -> Option<(Selection, bool)> {
+        if !self.rig_editable() {
+            return None;
+        }
+        let what = self.selected?;
+        Some((what, self.is_enabled(what)?))
+    }
+
+    /// Whether one device or channel is switched on.
+    ///
+    /// `None` where the question does not apply: a plot, anything read back out
+    /// of a recording, and the calculated device, which has no settings of its
+    /// own in the config to record the answer in.
+    fn is_enabled(&self, what: Selection) -> Option<bool> {
+        match what {
+            Selection::Device(index) => Some(self.config.devices.get(index)?.enabled),
+            Selection::Channel(device, channel) => Some(
+                self.config.devices.get(device)?.hardware.channel_infos().get(channel)?.enabled,
+            ),
+            Selection::CalculatedChannel(at) => {
+                Some(self.config.calculated.as_ref()?.channels.get(at)?.info.enabled)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether a device has any channel switched off.
+    ///
+    /// What decides whether the menu offers to switch them all back on. Offered
+    /// only when there is something to do, unlike its neighbours which stay and
+    /// grey: those are always meaningful and merely unavailable during a run,
+    /// where this would be an entry that does nothing at all.
+    fn any_channel_disabled(&self, what: Selection) -> bool {
+        match what {
+            Selection::Device(index) => match self.config.devices.get(index) {
+                Some(device) => device.hardware.channel_infos().iter().any(|c| !c.enabled),
+                None => false,
+            },
+            Selection::Calculated => match self.config.calculated.as_ref() {
+                Some(calculated) => calculated.channels.iter().any(|c| !c.info.enabled),
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// The switching entries a right click menu offers for one row.
+    ///
+    /// Between adding and deleting: adding makes something, deleting unmakes
+    /// it, and switching sits between the two in what it does as well as in
+    /// where it is listed.
+    fn switching_entries(
+        &self,
+        what: Selection,
+    ) -> Vec<(&'static str, Option<Message>)> {
+        let editable = self.rig_editable();
+        let mut entries: Vec<(&'static str, Option<Message>)> = Vec::new();
+
+        if let Some(on) = self.is_enabled(what) {
+            entries.push((
+                match on {
+                    true => "Disable",
+                    false => "Enable",
+                },
+                match editable {
+                    true => Some(Message::EnabledSet(what, !on)),
+                    false => None,
+                },
+            ));
+        }
+
+        if self.any_channel_disabled(what) {
+            entries.push((
+                "Enable all channels",
+                match editable {
+                    true => Some(Message::AllChannelsEnabled(what)),
+                    false => None,
+                },
+            ));
+        }
+
+        entries
+    }
+
     /// Adding a channel to whatever is selected, where that means anything.
     ///
     /// Only a device takes a channel. A plot, a channel, and anything read
@@ -6657,6 +6863,28 @@ impl AppDaq {
         // having where its absence would be a surprise - the
         // transport buttons keep their places - but nothing is
         // owed an explanation for why a recorded run has no delete.
+        // Leftmost of the three. It is the widest reaching of them - what it
+        // switches off stops being read at all - so it reads first rather than
+        // being tucked behind the two that change one thing each.
+        let enabling = self.enabling_selected().map(|(what, on)| {
+            Element::from(hint(
+                // Padded on the right because the row's own spacing is not the
+                // whole gap: the icons beside it are buttons carrying four
+                // points of padding of their own, so icon to icon is twelve
+                // where this was eight. The padding makes up the difference.
+                container(
+                    toggler(on)
+                        .on_toggle(move |wanted| Message::EnabledSet(what, wanted))
+                        .size(13),
+                )
+                    .padding(padding::right(4)),
+                match on {
+                    true => "Disable",
+                    false => "Enable",
+                },
+            ))
+        });
+
         // Left of the delete, in the order the two sit in a device's row.
         let add = self.add_to_selected().map(|message| {
             Element::from(
@@ -6710,6 +6938,7 @@ impl AppDaq {
 
         self.pane(
             row![text("Configuration"), space::horizontal()]
+                .extend(enabling)
                 .extend(add)
                 .extend(remove)
                 .spacing(4)

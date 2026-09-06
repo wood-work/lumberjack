@@ -520,6 +520,40 @@ pub(crate) fn read_only<'a>(label: &'a str, value: String, tone: Tone) -> Elemen
     column![field_label(label), field].spacing(2).into()
 }
 
+/// The same content, dimmed when it is switched off.
+///
+/// A container's text colour reaches everything inside it that does not set
+/// its own, so one wrapper fades a whole row - name, icon and reading - rather
+/// than each part being told separately and one of them being forgotten.
+///
+/// Wrapped either way, so what sits at this position in the tree keeps its
+/// type as something is switched on and off.
+pub(crate) fn faded<'a>(content: Element<'a, Message>, on: bool) -> Element<'a, Message> {
+    container(content)
+        .style(move |theme: &Theme| match on {
+            true => container::Style::default(),
+            false => container::Style {
+                text_color: Some(dimmed(theme)),
+                ..container::Style::default()
+            },
+        })
+        .into()
+}
+
+/// Text at half strength: present, readable, plainly not in use.
+pub(crate) fn dimmed(theme: &Theme) -> Color {
+    let text = theme.extended_palette().background.base.text;
+    Color { a: text.a * 0.45, ..text }
+}
+
+/// A button whose label is dimmed, for a device that is switched off.
+///
+/// Its own style rather than the `faded` wrapper above, because a button sets
+/// its own text colour and so ignores what a container around it asks for.
+pub(crate) fn faded_button(theme: &Theme, status: button::Status) -> button::Style {
+    button::Style { text_color: dimmed(theme), ..button::text(theme, status) }
+}
+
 /// A hairline across the width, with `gap` of room either side of it.
 ///
 /// The line is the inner container and the padding belongs to the outer one.
