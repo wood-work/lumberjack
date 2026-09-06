@@ -3,7 +3,7 @@ name = "picolog"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/willhunt/lumberjack"
+repository = "https://github.com/wood-work/lumberjack"
 description = "Safe wrappers over the Pico Technology data logger drivers"
 
 # libloading only. The driver is found at runtime rather than linked, so this
