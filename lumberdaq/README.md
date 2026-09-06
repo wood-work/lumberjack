@@ -609,8 +609,15 @@ was measured stays distinct from what was worked out.
 ```
 
 Inputs are given short names because channel names have spaces and quoting those
-inside an expression is miserable. The usual arithmetic works, along with
-`sqrt`, `abs`, `ln`, `log10`, `exp`, the trigonometric functions and `round`.
+inside an expression is miserable. The usual arithmetic works — `+ - * / %` and
+`^` for a power — along with `sqrt`, `abs`, `round`, `floor`, `ceil`, `ln`,
+`log10`, `exp`, `log(x, base)`, the trigonometric functions, `atan2(y, x)`,
+`min(a, b)`, `max(a, b)`, `pow(a, b)` and `hypot(a, b)`. Angles are in radians.
+
+All of them answer to their plain names. evalexpr spells some of these
+`math::sqrt`, and those forms still work, but nothing needs the prefix — having
+half the functions want one and half refuse it was a distinction with nothing
+behind it.
 
 Equations are read at run time, so a program embedding lumberdaq can let someone
 write one while it is running. `CalculatedChannel::validate` runs exactly the

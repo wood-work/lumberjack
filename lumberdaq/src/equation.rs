@@ -89,6 +89,13 @@ impl Expression {
 /// evalexpr provides these as `math::sqrt` and so on. Someone typing an
 /// equation into a box expects `sqrt(v)`, not `math::sqrt(v)`, so the plain
 /// names are bound here as well. The prefixed forms keep working.
+///
+/// Both arities, and for a reason worth writing down. When only the one
+/// argument functions were aliased, `sqrt(x)` worked and `pow(a, b)` did not,
+/// so a help page had to explain that some functions want a prefix and others
+/// refuse one — a distinction with nothing behind it but which table they
+/// happened to be in. evalexpr's own `min`, `max`, `floor` and `ceil` are
+/// already plain and are left alone.
 fn fresh_context() -> Context {
     let mut context = Context::new();
     let unary: [(&str, fn(f64) -> f64); 12] = [
@@ -116,6 +123,26 @@ fn fresh_context() -> Context {
             }),
         );
     }
+
+    // The order is the one the name implies: `log(x, base)`, `atan2(y, x)`.
+    let binary: [(&str, fn(f64, f64) -> f64); 4] = [
+        ("pow", f64::powf),
+        ("log", f64::log),
+        ("hypot", f64::hypot),
+        ("atan2", f64::atan2),
+    ];
+    for (name, function) in binary {
+        let _ = context.set_function(
+            name.to_string(),
+            evalexpr::Function::new(move |argument| {
+                let pair = argument.as_fixed_len_tuple(2)?;
+                let first = pair[0].as_number()?;
+                let second = pair[1].as_number()?;
+                Ok(evalexpr::Value::from_float(function(first, second)))
+            }),
+        );
+    }
+
     context
 }
 
@@ -130,6 +157,60 @@ mod tests {
     /// Variable names, all set to 1, for checking an equation's shape.
     fn stand_ins(names: &[&str]) -> Vec<(String, f64)> {
         names.iter().map(|name| (name.to_string(), 1.0)).collect()
+    }
+
+    /// Every function the interface's help offers, tried under the plain name
+    /// it offers them under. The help is written from this list, so a name
+    /// that stops working here is a help page that starts lying.
+    #[test]
+    fn every_function_works_without_a_prefix() {
+        let cases: [(&str, f64); 20] = [
+            ("sqrt(9)", 3.0),
+            ("abs(-3)", 3.0),
+            ("round(1.5)", 2.0),
+            ("floor(1.7)", 1.0),
+            ("ceil(1.2)", 2.0),
+            ("ln(1)", 0.0),
+            ("log10(100)", 2.0),
+            ("exp(0)", 1.0),
+            ("sin(0)", 0.0),
+            ("cos(0)", 1.0),
+            ("tan(0)", 0.0),
+            ("asin(0)", 0.0),
+            ("acos(1)", 0.0),
+            ("atan(0)", 0.0),
+            ("min(2, 5)", 2.0),
+            ("max(2, 5)", 5.0),
+            // The two argument ones, which for a long time answered only to a
+            // `math::` prefix while their neighbours refused one.
+            ("pow(2, 3)", 8.0),
+            ("log(8, 2)", 3.0),
+            ("hypot(3, 4)", 5.0),
+            ("atan2(0, 1)", 0.0),
+        ];
+
+        for (equation, expected) in cases {
+            let value = Expression::compile(equation)
+                .unwrap_or_else(|why| panic!("{} did not compile: {}", equation, why))
+                .evaluate(&[])
+                .unwrap_or_else(|why| panic!("{} did not evaluate: {}", equation, why));
+            assert!(
+                (value - expected).abs() < 1e-9,
+                "{} gave {} rather than {}",
+                equation,
+                value,
+                expected
+            );
+        }
+    }
+
+    /// The prefixed spelling was what worked before the plain names existed, so
+    /// an equation already written with one has to keep working.
+    #[test]
+    fn the_prefixed_spelling_still_works() {
+        for equation in ["math::sqrt(9)", "math::pow(2, 3)"] {
+            assert!(Expression::compile(equation).unwrap().evaluate(&[]).is_ok(), "{}", equation);
+        }
     }
 
     #[test]
