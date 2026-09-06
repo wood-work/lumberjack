@@ -2,6 +2,8 @@
 name = "choptui"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/willhunt/lumberjack"
 description = "Terminal monitor for a lumberdaq acquisition"
 
 # lumberdaq and nothing else so far. Drawing comes later; what matters now is
