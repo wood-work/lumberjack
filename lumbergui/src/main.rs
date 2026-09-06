@@ -4807,30 +4807,11 @@ impl AppDaq {
                 text("Worked out from measured channels, and recorded beside them.").size(13),
             ]
             .spacing(2),
+            // No channel count and no adding from here. No other device's
+            // settings list what is under it - the tree does that, and adding
+            // a channel is the plus in the panel's own heading, which knows
+            // this device as well as any other.
             self.rig_field("Name", &calculated.info.name, Message::CalculatedRenamed),
-            row![
-                text(format!(
-                    "{} channel{}",
-                    calculated.channels.len(),
-                    match calculated.channels.len() {
-                        1 => "",
-                        _ => "s",
-                    }
-                ))
-                .size(13),
-                space::horizontal(),
-                hint(
-                    button(circle_plus().size(14))
-                        .style(button::text)
-                        .padding(4)
-                        .on_press_maybe(match self.rig_editable() {
-                            true => Some(Message::CalculatedChannelAdded),
-                            false => None,
-                        }),
-                    "Add a calculated channel",
-                ),
-            ]
-            .align_y(Center),
         ]
         .spacing(12)
         .into()
@@ -6422,16 +6403,14 @@ impl AppDaq {
                     .into(),
                 };
 
-                let (selected, press, _add) = match device.kind {
+                let (selected, press) = match device.kind {
                     DeviceKind::Measured(at) => (
                         self.selected == Some(Selection::Device(at)),
                         Message::DeviceSelected(at),
-                        Some(Message::ChannelAdded(at)),
                     ),
                     DeviceKind::Calculated => (
                         self.selected == Some(Selection::Calculated),
                         Message::CalculatedSelected,
-                        Some(Message::CalculatedChannelAdded),
                     ),
                 };
 
@@ -6449,19 +6428,6 @@ impl AppDaq {
                     // of what it is called.
                     container(connection_dot(device.health()))
                         .padding(padding::left(6)),
-                    // space::horizontal(),
-                    // Adding a channel is a change to the rig like
-                    // any other, so it waits for the run to stop.
-                    // hint(
-                    //     button(add_channel_mark(self.rig_editable()))
-                    //         .style(button::text)
-                    //         .padding(4)
-                    //         .on_press_maybe(match self.rig_editable() {
-                    //             true => add,
-                    //             false => None,
-                    //         }),
-                    //     "Add channel",
-                    // ),
                 ]
                 .align_y(Center);
 
