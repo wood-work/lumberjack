@@ -1,3 +1,16 @@
+// No console window. Windows gives one to any program built as a console
+// application, which is the default, so the interface came up with an empty
+// black box beside it.
+//
+// Safe only because nothing here reports through stdout or stderr: with this
+// set there is no stdout or stderr to report through, and a program that said
+// anything that way would simply go quiet. What would have gone there goes to
+// the log file instead, panics included.
+//
+// Kept for release builds alone, so `cargo run` during development still has a
+// terminal to print into.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod acquisition;
 mod devicewatch;
 mod logbook;

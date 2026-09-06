@@ -1,0 +1,68 @@
+Lumberjack
+==========
+
+Two programs, both of which run as they are. There is nothing to install:
+the C runtime is linked in, so there is no redistributable to fetch.
+
+  lumbergui.exe    the graphical interface. Configure a rig, record from
+                   it, and look back at what was recorded. Start here.
+
+  choptui.exe      a terminal monitor for a recording. Shows readings and
+                   plots, and can start and stop recording, but cannot
+                   change a setup. Run it from a command prompt.
+
+
+A project
+---------
+
+Both take a *project*: a folder holding config.json, which describes the
+devices and channels. Everything recorded there goes into results.db
+beside it.
+
+Drag a folder onto the exe, pass it on the command line, or just start
+lumbergui.exe and it will ask.
+
+
+Hardware drivers
+----------------
+
+Lumberjack itself needs nothing installed. A driver is needed only for
+the hardware you actually own, and only when a device is opened:
+
+  Pico ADC-20 / ADC-24    PicoSDK
+                          https://www.picotech.com/downloads
+
+  NI USB-6001             NI-DAQmx Runtime with Configuration Support
+                          https://www.ni.com/en/support/downloads
+
+  Serial devices          nothing
+
+  Mock devices            nothing, which is what makes them useful for
+                          trying this out with no hardware attached
+
+A device whose driver is missing says so when it is opened, naming what
+it looked for, and the rest of the setup carries on recording without it.
+
+
+Settings and the log
+--------------------
+
+Kept in %APPDATA%\lumberjack:
+
+  settings.json     theme, text size, the last project opened
+  lumberjack.log    what happened, kept across sessions
+
+The log is the first thing to look at when something has gone wrong
+overnight, and the thing to send if you report a problem.
+
+
+This is an early release
+------------------------
+
+It works, but it has had little use against real hardware. A 0.x version
+number rather than 1.0.0 says so deliberately. Please report what you find:
+
+  https://github.com/wood-work/lumberjack
+
+MIT licensed. See LICENSE. README.md describes the whole project,
+including building it from source.
