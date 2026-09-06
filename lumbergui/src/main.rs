@@ -3470,7 +3470,12 @@ impl AppDaq {
                 }
             }
             Message::RunStopped => {
-                if self.run == RunState::Running {
+                // Starting counts. Opening a rig takes seconds - a Pico is
+                // about one, a serial port that is not there waits out its
+                // timeout - and a stop pressed during them is somebody who has
+                // changed their mind, not somebody to be ignored until the
+                // hardware is ready to be told.
+                if self.run == RunState::Running || self.run == RunState::Starting {
                     if let Some(acquisition) = self.acquisition.as_ref() {
                         // Lowered before the run ends so the recorder flushes
                         // and closes its sink, rather than the recording being
@@ -3624,6 +3629,19 @@ impl AppDaq {
         if config.devices.is_empty() {
             return;
         }
+
+        // The calculated channels are dropped before the rig is built, and
+        // that is the point of this line rather than an optimisation. Building
+        // a `Daq` compiles every equation first, so one typo in one of them
+        // made this fail outright and every device lose its dot - asking
+        // whether a cable is plugged in has nothing to do with whether an
+        // equation compiles, and the moment an equation is wrong is exactly
+        // when somebody wants to see that the hardware is still there.
+        //
+        // Nothing is lost by it. They own no hardware, so there is nothing
+        // here for them to answer about, and a run still refuses to start on a
+        // broken one.
+        config.calculated = None;
 
         let (sender, receiver) = mpsc::channel();
 
@@ -3949,7 +3967,14 @@ impl AppDaq {
     /// whole read interval of frozen window. Asking every frame costs nothing
     /// and the join is instant once it answers yes.
     fn reap_stopped_run(&mut self) {
-        if self.run != RunState::Stopping {
+        // Starting as well as Stopping. A run can end before it begins - a
+        // setup that will not build, a sink that will not attach - and the
+        // thread then reports what went wrong and returns without ever saying
+        // it is Ready. Watching only for Stopping left the interface in
+        // Starting for good: play refused because a run was under way and stop
+        // refused because none was, so the fault named in the log could not be
+        // gone and fixed.
+        if self.run != RunState::Stopping && self.run != RunState::Starting {
             return;
         }
 
@@ -3966,6 +3991,9 @@ impl AppDaq {
                     self.note("the acquisition thread panicked".to_string());
                 }
             }
+            // Which of the two ways this was reached decides what is worth
+            // saying at the end of it.
+            let never_started = self.run == RunState::Starting;
             self.run = RunState::Stopped;
             // A complaint is about a device that is reading, and none of them
             // are now. Left standing it would be an amber dot describing a run
@@ -3977,7 +4005,13 @@ impl AppDaq {
             // worth knowing before the next run rather than during it.
             self.check_connections();
             self.set_plot_panning(true);
-            self.note("acquisition stopped".to_string());
+            // "Stopped" would be the wrong word for something that never ran,
+            // and saying both reads as a contradiction. The reason is a line
+            // or two above either way.
+            self.note(match never_started {
+                true => "the run did not start".to_string(),
+                false => "acquisition stopped".to_string(),
+            });
         }
     }
 
