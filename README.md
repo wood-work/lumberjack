@@ -10,6 +10,8 @@ Data acquisition software for physical data logging devices. Package contains a 
 
 https://github.com/user-attachments/assets/ec16a795-9a55-4c5a-8c4b-27f981d4ebf2
 
+![The interface: the rig as a tree on the left with each device's latest readings and whether it answered, three plots of the recorded traces on the right, and the log along the foot](assets/LumberjackApplicationScreenshot.png)
+
 # Features
 
 Features include:
