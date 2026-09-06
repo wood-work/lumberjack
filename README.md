@@ -8,6 +8,8 @@
 
 Data acquisition software for physical data logging devices. Package contains a rust library `lumberdaq`, terminal user interface for logging and data visualisation only, and a graphical user interface that can be used for full configuration, data logging and visualisation as well as loading and inspection of data records.
 
+https://github.com/user-attachments/assets/ec16a795-9a55-4c5a-8c4b-27f981d4ebf2
+
 # Features
 
 Features include:
