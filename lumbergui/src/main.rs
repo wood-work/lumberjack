@@ -29,7 +29,7 @@ use iced_plot::{
     LineStyle, PlotStyle, PlotUiMessage, PlotWidget, PlotWidgetBuilder, Series, ShapeId,
 };
 use lumberdaq::calculated::ChannelRef;
-use lumberdaq::channel::{Channel, Scale};
+use lumberdaq::channel::{Channel, ChannelInfo, Scale};
 use lumberdaq::config::DaqConfig;
 use lumberdaq::configuration::read_configuration_file;
 use lumberdaq::daq::DaqInfo;
@@ -427,6 +427,44 @@ fn unused_channel_name(wanted: &str, existing: &[String]) -> String {
         .map(|suffix| format!("{} {}", wanted, suffix))
         .find(|name| !existing.contains(name))
         .unwrap_or_else(|| wanted.to_string())
+}
+
+/// What a constant's box should show: what was typed, or what is stored.
+///
+/// Without the first, a half written number would be rewritten under the
+/// cursor on every keystroke — `-` would vanish before it could become `-5`,
+/// and the `.` of `1.5` with it.
+fn typed_or(
+    draft: &Option<(Selection, String, String)>,
+    belongs_to: Selection,
+    name: &str,
+    value: f64,
+) -> String {
+    match draft {
+        Some((at, at_name, typed)) if *at == belongs_to && at_name == name => typed.clone(),
+        _ => value.to_string(),
+    }
+}
+
+/// A name for a new constant that is not already taken.
+///
+/// `a`, `b`, `c` and so on rather than "New parameter": the name is typed into
+/// an equation beside `x`, so a short one is a better starting point than a
+/// long one somebody has to clear first.
+fn unused_parameter_name(existing: &BTreeMap<String, f64>) -> String {
+    unused_constant_name(existing, &[])
+}
+
+/// The same, where some other names are spoken for as well.
+///
+/// A calculated channel's constants share the equation with its inputs, so a
+/// new constant must dodge both lists or it lands on a name the equation
+/// cannot tell apart.
+fn unused_constant_name(existing: &BTreeMap<String, f64>, taken: &[String]) -> String {
+    ('a'..='z')
+        .map(|letter| letter.to_string())
+        .find(|name| !existing.contains_key(name) && !taken.contains(name))
+        .unwrap_or_else(|| format!("k{}", existing.len() + 1))
 }
 
 /// Find one channel by the pair of names that identifies it.
@@ -1347,6 +1385,18 @@ struct AppDaq {
     plot_menu: bool,
     /// Whether the settings dialog is up.
     settings_open: bool,
+    /// A constant's value as it is being typed, and which constant it is.
+    ///
+    /// Kept as text because a number cannot be typed one keystroke at a time
+    /// and still be a number the whole way: `-` on its own is the start of
+    /// every negative value and parses as nothing, so a box that accepted only
+    /// what parses could never be given one. The stored constant follows along
+    /// whenever the text does parse.
+    ///
+    /// Keyed by what the panel is showing rather than by a channel, because a
+    /// scale's constants and a calculated channel's are the same box in two
+    /// panels, and `select` then clears it for both without knowing either.
+    parameter_draft: Option<(Selection, String, String)>,
     /// The formula help, and which field asked for it.
     formula_help: Option<FormulaHelp>,
     /// That help, parsed. Done when the dialog opens rather than while drawing:
@@ -1512,6 +1562,14 @@ enum Message {
     RecordedChannelRemoved(usize, usize),
     SettingsOpened,
     SettingsClosed,
+    CalculatedConstantAdded(usize),
+    CalculatedConstantRenamed(usize, String, String),
+    CalculatedConstantValueEdited(usize, String, String),
+    CalculatedConstantDeleted(usize, String),
+    ScaleParameterAdded(usize, usize),
+    ScaleParameterRenamed(usize, usize, String, String),
+    ScaleParameterValueEdited(usize, usize, String, String),
+    ScaleParameterDeleted(usize, usize, String),
     FormulaHelpOpened(FormulaHelp),
     FormulaHelpClosed,
     AddDeviceOpened,
@@ -1615,6 +1673,7 @@ impl AppDaq {
             over_plot: None,
             plot_menu: false,
             settings_open: false,
+            parameter_draft: None,
             formula_help: None,
             help_items: Vec::new(),
             panes: default_panes(),
@@ -1786,7 +1845,7 @@ impl AppDaq {
         self.plots = plots;
         self.plot_panes = plot_panes;
         self.window_seconds = window_seconds;
-        self.selected = None;
+        self.select(None);
         self.context = None;
         self.reference = Utc::now();
         // What is on screen is what the files say, so there is nothing owed to
@@ -2089,15 +2148,15 @@ impl AppDaq {
             }
             Message::RunSelected(run) => {
                 self.context = None;
-                self.selected = Some(Selection::Run(run));
+                self.select(Some(Selection::Run(run)));
             }
             Message::RunDeviceSelected(run, device) => {
                 self.context = None;
-                self.selected = Some(Selection::RunDevice(run, device));
+                self.select(Some(Selection::RunDevice(run, device)));
             }
             Message::RunChannelSelected(run, device, channel) => {
                 self.context = None;
-                self.selected = Some(Selection::RunChannel(run, device, channel));
+                self.select(Some(Selection::RunChannel(run, device, channel)));
                 self.start_drag(Dragged::Recorded(run, device, channel));
             }
             Message::RecordedChannelRemoved(plot, position) => {
@@ -2162,7 +2221,7 @@ impl AppDaq {
                     });
 
                     self.adding_device = None;
-                    self.selected = Some(Selection::Calculated);
+                    self.select(Some(Selection::Calculated));
                     self.rig_changed();
                     return;
                 }
@@ -2209,7 +2268,7 @@ impl AppDaq {
                 self.adding_device = None;
                 // Selected so its settings are there to fill in: a device with
                 // no channels is not finished being made.
-                self.selected = Some(Selection::Device(self.config.devices.len() - 1));
+                self.select(Some(Selection::Device(self.config.devices.len() - 1)));
                 self.rig_changed();
             }
             Message::DeviceDeleted(index) => {
@@ -2223,7 +2282,7 @@ impl AppDaq {
                     self.forget_device_on_plots(&device.info.name);
 
                     self.note(format!("deleted {}", device.info.name));
-                    self.selected = None;
+                    self.select(None);
                     self.rig_changed();
                 }
             }
@@ -2245,7 +2304,7 @@ impl AppDaq {
                     });
 
                     self.note(format!("deleted {}", info.name));
-                    self.selected = Some(Selection::Device(device));
+                    self.select(Some(Selection::Device(device)));
                     self.rig_changed();
                 }
             }
@@ -2255,7 +2314,7 @@ impl AppDaq {
                 if let Some(index) = number
                     .and_then(|number| self.view_plots.iter().position(|p| p.number == number))
                 {
-                    self.selected = Some(Selection::ViewPlot(index));
+                    self.select(Some(Selection::ViewPlot(index)));
                 }
             }
             Message::PlotClicked(pane) => {
@@ -2268,7 +2327,7 @@ impl AppDaq {
                         self.plots.iter().position(|plot| plot.number == number)
                     })
                 {
-                    self.selected = Some(Selection::Plot(index));
+                    self.select(Some(Selection::Plot(index)));
                 }
             }
             Message::PlotDragged(pane_grid::DragEvent::Dropped { pane, target })
@@ -2308,7 +2367,7 @@ impl AppDaq {
                 split_last(&mut self.view_panes, number);
                 self.settle_plots();
 
-                self.selected = Some(Selection::ViewPlot(self.view_plots.len() - 1));
+                self.select(Some(Selection::ViewPlot(self.view_plots.len() - 1)));
             }
             Message::AddPlot => {
                 // Past the highest in use rather than the length, so deleting
@@ -2327,11 +2386,11 @@ impl AppDaq {
 
                 // Selected so it can be configured: an empty plot is no use
                 // until something is put on it.
-                self.selected = Some(Selection::Plot(self.plots.len() - 1));
+                self.select(Some(Selection::Plot(self.plots.len() - 1)));
                 self.layout_changed();
             }
             Message::AllPlotsSelected => {
-                self.selected = Some(Selection::AllPlots);
+                self.select(Some(Selection::AllPlots));
             }
             Message::HistoryChanged(seconds) => {
                 // Taken up by the viewport on the next frame and by the trim
@@ -2384,7 +2443,7 @@ impl AppDaq {
                 if let Some(pane) = pane {
                     self.view_panes.close(pane);
                 }
-                self.selected = None;
+                self.select(None);
             }
             Message::PlotDeleted(index) => {
                 self.context = None;
@@ -2410,7 +2469,7 @@ impl AppDaq {
                     self.note(format!("deleted {}", plot.name));
                     // The panel was showing a plot that no longer exists, and
                     // every index after this one has moved.
-                    self.selected = None;
+                    self.select(None);
                     self.layout_changed();
                 }
             }
@@ -2622,7 +2681,7 @@ impl AppDaq {
                     // the channel panel, which is where it is asked for.
                     _ => {}
                 }
-                self.selected = Some(Selection::Device(index));
+                self.select(Some(Selection::Device(index)));
             }
             Message::CalculatedRenamed(name) => {
                 let Some(calculated) = self.config.calculated.as_mut() else { return };
@@ -2646,7 +2705,7 @@ impl AppDaq {
                 // longer has is a trace that never receives anything again.
                 self.forget_device_on_plots(&calculated.info.name);
                 self.devices.retain(|device| device.kind != DeviceKind::Calculated);
-                self.selected = None;
+                self.select(None);
                 self.note(format!("deleted {}", calculated.info.name));
                 self.rig_changed();
             }
@@ -2689,7 +2748,7 @@ impl AppDaq {
                     device.expanded = true;
                 }
 
-                self.selected = Some(Selection::CalculatedChannel(last));
+                self.select(Some(Selection::CalculatedChannel(last)));
                 self.rig_changed();
             }
             Message::CalculatedChannelDeleted(channel) => {
@@ -2713,7 +2772,7 @@ impl AppDaq {
                 self.forget_channel_on_plots(&reference);
 
                 // Whatever was selected is at best a different channel now.
-                self.selected = Some(Selection::Calculated);
+                self.select(Some(Selection::Calculated));
                 self.note(format!("deleted {}", gone));
                 self.rig_changed();
             }
@@ -2799,18 +2858,18 @@ impl AppDaq {
             Message::CalculatedSelected => {
                 self.context = None;
                 self.model = None;
-                self.selected = Some(Selection::Calculated);
+                self.select(Some(Selection::Calculated));
             }
             Message::CalculatedChannelSelected(channel) => {
                 self.context = None;
-                self.selected = Some(Selection::CalculatedChannel(channel));
+                self.select(Some(Selection::CalculatedChannel(channel)));
                 if let Some(reference) = self.calculated_reference(channel) {
                     self.start_drag(Dragged::Live(reference));
                 }
             }
             Message::ChannelSelected(device, channel) => {
                 self.context = None;
-                self.selected = Some(Selection::Channel(device, channel));
+                self.select(Some(Selection::Channel(device, channel)));
                 self.number_draft = self.channel_number(device, channel);
                 if let Some(reference) = self.live_reference(device, channel) {
                     self.start_drag(Dragged::Live(reference));
@@ -2866,7 +2925,7 @@ impl AppDaq {
                     }
                     // Straight to its settings: a channel bound to whatever
                     // input came next is a starting point, not an answer.
-                    self.selected = Some(Selection::Channel(index, position));
+                    self.select(Some(Selection::Channel(index, position)));
                     self.number_draft = self.channel_number(index, position);
                     self.rig_changed();
                 }
@@ -3130,6 +3189,139 @@ impl AppDaq {
                     };
                     self.rig_changed();
                 }
+            }
+            Message::CalculatedConstantAdded(at) => {
+                let Some(calculated) = self.config.calculated.as_mut() else { return };
+                let Some(channel) = calculated.channels.get_mut(at) else { return };
+
+                // Not one of the input names, which share the equation with
+                // these and cannot be told apart inside it.
+                let taken: Vec<String> = channel.inputs.keys().cloned().collect();
+                let name = unused_constant_name(&channel.parameters, &taken);
+
+                channel.parameters.insert(name, 0.0);
+                self.rig_changed();
+            }
+            Message::CalculatedConstantRenamed(at, from, to) => {
+                let Some(calculated) = self.config.calculated.as_mut() else { return };
+                let Some(channel) = calculated.channels.get_mut(at) else { return };
+
+                // Refused against the inputs as well as the other constants:
+                // the equation names both in one namespace, and `validate`
+                // would report the clash rather than let it through, but
+                // refusing here means never reaching a state to report.
+                if !to.is_empty()
+                    && (channel.parameters.contains_key(&to) || channel.inputs.contains_key(&to))
+                {
+                    return;
+                }
+                let Some(value) = channel.parameters.remove(&from) else { return };
+                channel.parameters.insert(to, value);
+
+                self.parameter_draft = None;
+                self.rig_changed();
+            }
+            Message::CalculatedConstantValueEdited(at, name, typed) => {
+                let parsed = typed.trim().parse::<f64>();
+                self.parameter_draft =
+                    Some((Selection::CalculatedChannel(at), name.clone(), typed));
+
+                if let Ok(value) = parsed {
+                    let Some(calculated) = self.config.calculated.as_mut() else { return };
+                    let Some(channel) = calculated.channels.get_mut(at) else { return };
+                    if let Some(held) = channel.parameters.get_mut(&name) {
+                        *held = value;
+                        self.rig_changed();
+                    }
+                }
+            }
+            Message::CalculatedConstantDeleted(at, name) => {
+                let Some(calculated) = self.config.calculated.as_mut() else { return };
+                let Some(channel) = calculated.channels.get_mut(at) else { return };
+
+                channel.parameters.remove(&name);
+                self.parameter_draft = None;
+                self.rig_changed();
+            }
+            Message::ScaleParameterAdded(device, channel) => {
+                let Some(info) = self.channel_info_mut(device, channel) else { return };
+                let Some(scale) = info.scale.take() else { return };
+
+                // Adding one is what turns a plain formula into a
+                // parameterised one. There is no separate kind to choose
+                // first, because choosing it would be answering a question
+                // nobody asked: the constants are the point, not the form.
+                let (from, equation, mut parameters) = match scale {
+                    Scale::Equation(equation) => (None, equation, BTreeMap::new()),
+                    Scale::Parameterised { from, equation, parameters } => {
+                        (from, equation, parameters)
+                    }
+                };
+
+                parameters.insert(unused_parameter_name(&parameters), 0.0);
+                info.scale = Some(Scale::Parameterised { from, equation, parameters });
+                self.rig_changed();
+            }
+            Message::ScaleParameterRenamed(device, channel, from, to) => {
+                let Some(info) = self.channel_info_mut(device, channel) else { return };
+                let Some(Scale::Parameterised { parameters, .. }) = info.scale.as_mut() else {
+                    return;
+                };
+
+                // Refused rather than applied, as a calculated input is: a map
+                // holds one value per name, so renaming onto one already there
+                // would swallow the other constant. Empty is allowed through,
+                // being what clearing the box to retype it looks like.
+                if !to.is_empty() && parameters.contains_key(&to) {
+                    return;
+                }
+                let Some(value) = parameters.remove(&from) else { return };
+                parameters.insert(to, value);
+
+                // The draft was about a name that no longer exists.
+                self.parameter_draft = None;
+                self.rig_changed();
+            }
+            Message::ScaleParameterValueEdited(device, channel, name, typed) => {
+                // Held whatever it says, so the box shows what was typed rather
+                // than refusing the keystroke.
+                let parsed = typed.trim().parse::<f64>();
+                self.parameter_draft =
+                    Some((Selection::Channel(device, channel), name.clone(), typed));
+
+                if let Ok(value) = parsed {
+                    let Some(info) = self.channel_info_mut(device, channel) else { return };
+                    let Some(Scale::Parameterised { parameters, .. }) = info.scale.as_mut() else {
+                        return;
+                    };
+                    if let Some(held) = parameters.get_mut(&name) {
+                        *held = value;
+                        self.rig_changed();
+                    }
+                }
+            }
+            Message::ScaleParameterDeleted(device, channel, name) => {
+                let Some(info) = self.channel_info_mut(device, channel) else { return };
+                let Some(Scale::Parameterised { from, equation, parameters }) = info.scale.take()
+                else {
+                    return;
+                };
+
+                let mut parameters = parameters;
+                parameters.remove(&name);
+
+                // Back to the plain form once the last constant goes, so the
+                // config says `"scale": "x * 2"` rather than an object wrapped
+                // round an empty map. Not when the scale remembers which sensor
+                // definition it came from: that label is worth more than the
+                // tidiness, and demoting would throw it away.
+                info.scale = Some(match parameters.is_empty() && from.is_none() {
+                    true => Scale::Equation(equation),
+                    false => Scale::Parameterised { from, equation, parameters },
+                });
+
+                self.parameter_draft = None;
+                self.rig_changed();
             }
             Message::LogToggled => {
                 // The log is the outermost split, so the root of the layout is
@@ -4715,6 +4907,56 @@ impl AppDaq {
             false => rows.into(),
         };
 
+        // Laid out as the inputs are, because they are the same thing to
+        // whoever is writing the equation: a name on the left, what it stands
+        // for on the right. That one is a channel and the other a fixed number
+        // is the only difference, and the equation does not care.
+        let constants = column(channel.parameters.iter().map(|(name, value)| {
+            let renaming = name.clone();
+            let editing = name.clone();
+            let deleting = name.clone();
+            let shown =
+                typed_or(&self.parameter_draft, Selection::CalculatedChannel(at), name, *value);
+
+            row![
+                match editable {
+                    true => text_input("name", name)
+                        .on_input(move |to| {
+                            Message::CalculatedConstantRenamed(at, renaming.clone(), to)
+                        })
+                        .size(14)
+                        .width(70)
+                        .style(field_style),
+                    false => text_input("name", name).size(14).width(70).style(field_style),
+                },
+                text("=").size(14),
+                match editable {
+                    true => text_input("0", &shown)
+                        .on_input(move |typed| {
+                            Message::CalculatedConstantValueEdited(at, editing.clone(), typed)
+                        })
+                        .size(14)
+                        .width(Fill)
+                        .style(field_style),
+                    false => text_input("0", &shown).size(14).width(Fill).style(field_style),
+                },
+                hint(
+                    button(trash_two().size(14))
+                        .style(button::text)
+                        .padding(4)
+                        .on_press_maybe(match editable {
+                            true => Some(Message::CalculatedConstantDeleted(at, deleting.clone())),
+                            false => None,
+                        }),
+                    "Remove this constant",
+                ),
+            ]
+            .spacing(6)
+            .align_y(Center)
+            .into()
+        }))
+        .spacing(4);
+
         column![
             column![
                 text("Calculated channel").size(16),
@@ -4730,9 +4972,16 @@ impl AppDaq {
                 &channel.info.unit,
                 move |unit| Message::CalculatedChannelUnitEdited(at, unit),
             ),
+            // The same split as a measured channel's, in the same place: above
+            // is what the channel is called and what its number means, below
+            // is the arithmetic that produces it.
+            divider(6.0),
             self.rig_field_checked(
                 "Equation",
-                Some("Written in terms of the input names below, such as (v + 1) * 2.5."),
+                Some(
+                    "Written in terms of the input and constant names below, such as \
+                     (v + 1) * 2.5.",
+                ),
                 &channel.equation,
                 problem,
                 Some(FormulaHelp::Equation),
@@ -4755,6 +5004,33 @@ impl AppDaq {
                 ]
                 .align_y(Center),
                 inputs,
+            ]
+            .spacing(2),
+            // The same box as a scale's constants, and for the same reason:
+            // `dp * 12.7` says nothing about what 12.7 was, where a named
+            // `coefficient` stays editable and a saved project records it.
+            column![
+                row![
+                    field_label("Constants"),
+                    space::horizontal(),
+                    hint(
+                        button(circle_plus().size(14))
+                            .style(button::text)
+                            .padding(4)
+                            .on_press_maybe(match editable {
+                                true => Some(Message::CalculatedConstantAdded(at)),
+                                false => None,
+                            }),
+                        "Add a fixed number to this equation",
+                    ),
+                ]
+                .align_y(Center),
+                match channel.parameters.is_empty() {
+                    true => Element::from(
+                        text("None. The equation reads only its inputs.").size(12),
+                    ),
+                    false => constants.into(),
+                },
             ]
             .spacing(2),
         ]
@@ -5536,13 +5812,19 @@ impl AppDaq {
             // A differential pair starts on an odd channel and takes the one
             // above it; whether this one may is the backend's to say, and it
             // says so through the problem line on the device.
-            checkbox(pico.single_ended)
+            //
+            // Given more room than the column's own spacing. Every other
+            // setting here carries a label above it that holds it off its
+            // neighbour; a bare checkbox has none, and sits against the field
+            // above as though it belonged to it.
+            container(checkbox(pico.single_ended)
                 .label("Single ended")
                 .text_size(14)
                 .on_toggle_maybe(match editable {
                     true => Some(move |single| Message::PicoSingleEnded(device, channel, single)),
                     false => None,
-                }),
+                }))
+            .padding(padding::top(6).bottom(6)),
         ]
         .spacing(8)
         .into()
@@ -5597,13 +5879,19 @@ impl AppDaq {
             column![text("Range").size(13), range].spacing(2),
             // NI pairs a channel with the one four above it, so on an eight
             // input device only ai0 to ai3 can start a pair.
-            checkbox(ni.single_ended)
-                .label("Single ended")
-                .text_size(14)
-                .on_toggle_maybe(match editable {
-                    true => Some(move |single| Message::NiSingleEnded(device, channel, single)),
-                    false => None,
-                }),
+            //
+            // Padded like the Pico one, and for the same reason: a bare
+            // checkbox has no label above it to hold it off its neighbour.
+            container(
+                checkbox(ni.single_ended)
+                    .label("Single ended")
+                    .text_size(14)
+                    .on_toggle_maybe(match editable {
+                        true => Some(move |single| Message::NiSingleEnded(device, channel, single)),
+                        false => None,
+                    }),
+            )
+            .padding(padding::top(6).bottom(6)),
         ]
         .spacing(8)
         .into()
@@ -5670,46 +5958,9 @@ impl AppDaq {
             self.rig_field("Name", &info.name, move |name| {
                 Message::ChannelRenamed(device, channel, name)
             }),
-            // Directly above the unit it produces, because that is the pair:
-            // the formula decides what the recorded number is and the unit
-            // says what it means. A scale replaces the measurement rather than
-            // adding a channel, so this belongs to the channel's own settings
-            // rather than to a thing of its own.
-            self.rig_field_checked(
-                "Formula",
-                Some(
-                    "The measurement is written x, so x * 5 + 5 records five times the reading \
-                     plus five, in the unit below. The raw reading is not kept. Leave empty to \
-                     record the measurement as it is.",
-                ),
-                info.scale.as_ref().map(|scale| scale.equation()).unwrap_or(""),
-                problem,
-                Some(FormulaHelp::Scale),
-                move |equation| Message::ScaleEdited(device, channel, equation),
-            ),
             self.rig_field("Unit", &info.unit, move |unit| {
                 Message::ChannelUnitChanged(device, channel, unit)
             }),
-            // A scale carrying named constants from a sensor definition shows
-            // where they came from and what they are, read only: editing those
-            // wants a form of its own rather than a list.
-            match info.scale.as_ref().and_then(|scale| scale.from()) {
-                Some(from) => field_label(from),
-                None => Element::from(space::horizontal().width(0)),
-            },
-            match info.scale.as_ref().and_then(|scale| scale.parameters()) {
-                None => Element::from(space::horizontal().width(0)),
-                Some(parameters) => column(parameters.iter().map(|(name, value)| {
-                    row![
-                        text(name.as_str()).size(13),
-                        space::horizontal(),
-                        text(value.to_string()).size(13)
-                    ]
-                    .into()
-                }))
-                .spacing(2)
-                .into(),
-            },
             // Everything below differs by backend: a mock channel's input, a
             // serial channel's field index, a Pico's channel number and how it
             // pairs for a differential reading. One form cannot ask all of it.
@@ -5737,10 +5988,155 @@ impl AppDaq {
                 Some(HardwareConfig::None) => space::horizontal().width(0).into(),
                 None => space::horizontal().width(0).into(),
             },
+            // Last rather than second. A formula with constants under it is
+            // the longest thing on this panel and the part somebody comes back
+            // to, where the name and the unit are set once and left; above them
+            // it pushed everything identifying the channel off the top of a
+            // short panel.
+            //
+            // Ruled off because it is a different kind of thing from what
+            // precedes it: everything above describes the channel and where its
+            // numbers come from, and this is arithmetic done to them afterwards.
+            divider(6.0),
+            self.scale_settings(device, channel, info, problem),
             match self.rig_editable() {
                 true => Element::from(space::horizontal().width(0)),
                 false => field_label("Stop the run to change these"),
             },
+        ]
+        .spacing(8)
+        .into()
+    }
+
+    /// A channel's formula, and the named constants it works with.
+    ///
+    /// Naming the constants is what keeps them editable. Written into the
+    /// arithmetic, `x / 120` gives no hint that 120 is a shunt resistor, so
+    /// refitting a 100 ohm one means working the equation out again, and no
+    /// saved project can say which sensor it was for.
+    fn scale_settings<'a>(
+        &'a self,
+        device: usize,
+        channel: usize,
+        info: &'a ChannelInfo,
+        problem: Option<String>,
+    ) -> Element<'a, Message> {
+        let editable = self.rig_editable();
+
+        let formula = self.rig_field_checked(
+            "Formula",
+            Some(
+                "The measurement is written x, so x * 5 + 5 records five times the reading \
+                 plus five, in the unit above. The raw reading is not kept. Leave empty to \
+                 record the measurement as it is.",
+            ),
+            info.scale.as_ref().map(|scale| scale.equation()).unwrap_or(""),
+            problem,
+            Some(FormulaHelp::Scale),
+            move |equation| Message::ScaleEdited(device, channel, equation),
+        );
+
+        // Nothing to hold constants for. A formula is what uses them, so
+        // offering to add one to a channel that has none would be offering to
+        // make something that could not be referred to.
+        let Some(scale) = info.scale.as_ref() else {
+            return formula;
+        };
+
+        let parameters = scale.parameters().cloned().unwrap_or_default();
+
+        let rows = column(parameters.iter().map(|(name, value)| {
+            let renaming = name.clone();
+            let editing = name.clone();
+            let deleting = name.clone();
+
+            // What was typed, if this is the box being typed in, and the stored
+            // number otherwise. Without the first, a half written number would
+            // be rewritten under the cursor on every keystroke.
+            let shown = typed_or(
+                &self.parameter_draft,
+                Selection::Channel(device, channel),
+                name,
+                *value,
+            );
+
+            row![
+                match editable {
+                    true => text_input("name", name)
+                        .on_input(move |to| {
+                            Message::ScaleParameterRenamed(device, channel, renaming.clone(), to)
+                        })
+                        .size(14)
+                        .width(90)
+                        .style(field_style),
+                    false => text_input("name", name).size(14).width(90).style(field_style),
+                },
+                text("=").size(14),
+                match editable {
+                    true => text_input("0", &shown)
+                        .on_input(move |typed| {
+                            Message::ScaleParameterValueEdited(
+                                device,
+                                channel,
+                                editing.clone(),
+                                typed,
+                            )
+                        })
+                        .size(14)
+                        .width(Fill)
+                        .style(field_style),
+                    false => text_input("0", &shown).size(14).width(Fill).style(field_style),
+                },
+                button(trash_two().size(14))
+                    .style(danger_on_hover)
+                    .padding(4)
+                    .on_press_maybe(match editable {
+                        true => {
+                            Some(Message::ScaleParameterDeleted(device, channel, deleting.clone()))
+                        }
+                        false => None,
+                    }),
+            ]
+            .spacing(4)
+            .align_y(Center)
+            .into()
+        }))
+        .spacing(4);
+
+        column![
+            formula,
+            // Where the numbers came from, if the scale remembers. A label
+            // rather than a field: it names a sensor definition somebody else
+            // wrote, and editing it here would claim these numbers came from
+            // something they did not.
+            match scale.from() {
+                Some(from) => field_label(from),
+                None => Element::from(space::horizontal().width(0)),
+            },
+            column![
+                row![
+                    field_label("Constants"),
+                    space::horizontal(),
+                    hint(
+                        button(circle_plus().size(14))
+                            .style(button::text)
+                            .padding(4)
+                            .on_press_maybe(match editable {
+                                true => Some(Message::ScaleParameterAdded(device, channel)),
+                                false => None,
+                            }),
+                        "Add a constant to this formula",
+                    ),
+                ]
+                .align_y(Center),
+                match parameters.is_empty() {
+                    true => Element::from(
+                        text("None. The formula reads only the measurement, x.").size(13),
+                    ),
+                    false => rows.into(),
+                },
+            ]
+            .spacing(4),
         ]
         .spacing(8)
         .into()
@@ -6259,6 +6655,17 @@ impl AppDaq {
                 device.connected = *connected;
             }
         }
+    }
+
+    /// Show something else in the configuration panel.
+    ///
+    /// Every change of selection goes through here so that whatever belonged
+    /// to the last subject is dropped with it. At present that is the half
+    /// typed constant: leaving one behind means coming back to a box showing
+    /// text that is not what the setup holds.
+    fn select(&mut self, what: Option<Selection>) {
+        self.selected = what;
+        self.parameter_draft = None;
     }
 
     /// Adding a channel to whatever is selected, where that means anything.

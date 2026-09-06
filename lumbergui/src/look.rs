@@ -197,22 +197,7 @@ pub(crate) fn menu<'a>(items: Vec<MenuItem<'a>>, width: f32) -> Element<'a, Mess
                 .into(),
             // Groups what is above it apart from what is below, which is the
             // whole of its job.
-            // The line is the inner container; the padding belongs to the
-            // outer one. Painting a padded container makes the padding part of
-            // the line, which is how a one pixel rule came out five thick.
-            MenuItem::Divider => container(
-                container(space::horizontal().height(1)).width(Fill).style(
-                    |theme: &Theme| container::Style {
-                        background: Some(
-                            theme.extended_palette().background.strong.color.into(),
-                        ),
-                        ..container::Style::default()
-                    },
-                ),
-            )
-            .width(Fill)
-            .padding(padding::top(4).bottom(4))
-            .into(),
+            MenuItem::Divider => divider(4.0),
         }))
         .spacing(2),
     )
@@ -533,6 +518,25 @@ pub(crate) fn read_only<'a>(label: &'a str, value: String, tone: Tone) -> Elemen
     });
 
     column![field_label(label), field].spacing(2).into()
+}
+
+/// A hairline across the width, with `gap` of room either side of it.
+///
+/// The line is the inner container and the padding belongs to the outer one.
+/// Painting a padded container makes the padding part of the line, which is how
+/// a one pixel rule once came out five thick.
+pub(crate) fn divider<'a>(gap: f32) -> Element<'a, Message> {
+    container(
+        container(space::horizontal().height(1)).width(Fill).style(|theme: &Theme| {
+            container::Style {
+                background: Some(theme.extended_palette().background.strong.color.into()),
+                ..container::Style::default()
+            }
+        }),
+    )
+    .width(Fill)
+    .padding(padding::top(gap).bottom(gap))
+    .into()
 }
 
 /// A control that is plain until the pointer is on it, and then is a warning.
