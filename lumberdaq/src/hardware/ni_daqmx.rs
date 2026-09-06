@@ -12,7 +12,7 @@
 use crate::channel::ChannelInfo;
 use crate::datapoint::DataPoint;
 use crate::device::DeviceInterface;
-use crate::hardware::HardwareDataAquisition;
+use crate::hardware::HardwareDataAcquisition;
 use crate::{ Error, Result };
 use nidaqmx::{ can_be_differential, differential_partner, Daqmx, Task, Terminal };
 use serde::{ Deserialize, Serialize };
@@ -257,7 +257,7 @@ impl DeviceInterface for NiDaqmx {
     }
 }
 
-impl HardwareDataAquisition for NiDaqmx {
+impl HardwareDataAcquisition for NiDaqmx {
     fn read(&mut self) -> Result<Vec<Vec<DataPoint>>> {
         let task = match &mut self.task {
             Some(task) => task,

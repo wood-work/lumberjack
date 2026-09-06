@@ -2,7 +2,7 @@ use crate::{ Error, Result };
 use crate::calculated::{ Calculator, ChannelRef };
 use crate::config::{ DaqConfig, DeviceConfig };
 use crate::device::Device;
-use crate::hardware::HardwareDataAquisition;
+use crate::hardware::HardwareDataAcquisition;
 use crate::session::{ run_device, DeviceEvent, DeviceMessage };
 use crate::storage::DataSink;
 use serde::{ Deserialize, Serialize };

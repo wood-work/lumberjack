@@ -2,7 +2,7 @@ use crate::{ Error, Result };
 use crate::datapoint::DataPoint;
 use crate::channel::ChannelInfo;
 use crate::device::{ Device, DeviceInterface };
-use crate::hardware::{HardwareDataAquisition, Hardware };
+use crate::hardware::{HardwareDataAcquisition, Hardware };
 use chrono::{ DateTime, Utc };
 use serde::{Deserialize, Serialize};
 use rand::random;
@@ -155,7 +155,7 @@ impl DeviceInterface for MockHardware {
     }
 }
 
-impl HardwareDataAquisition for MockHardware {
+impl HardwareDataAcquisition for MockHardware {
     fn read(&mut self) -> Result<Vec<Vec<DataPoint>>> {
         let started = match self.started {
             Some(started) => started,

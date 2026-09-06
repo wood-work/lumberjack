@@ -1,7 +1,7 @@
 use crate::channel::ChannelInfo;
 use crate::datapoint::DataPoint;
 use crate::device::{ Device, DeviceInterface };
-use crate::hardware::{ Hardware, HardwareDataAquisition };
+use crate::hardware::{ Hardware, HardwareDataAcquisition };
 use crate::{ Error, Result };
 use picolog::hrdl::{
     can_be_differential, counts_to_volts, differential_partner, ConversionTime, Hrdl,
@@ -325,7 +325,7 @@ impl DeviceInterface for PicoHrdl {
     }
 }
 
-impl HardwareDataAquisition for PicoHrdl {
+impl HardwareDataAcquisition for PicoHrdl {
     fn read(&mut self) -> Result<Vec<Vec<DataPoint>>> {
         let unit = match &self.unit {
             Some(unit) => unit,

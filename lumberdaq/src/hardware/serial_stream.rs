@@ -2,7 +2,7 @@ use crate::{ Error, Result };
 use crate::datapoint::DataPoint;
 use crate::channel::ChannelInfo;
 use crate::device::{ Device, DeviceInterface };
-use crate::hardware::{HardwareDataAquisition, Hardware };
+use crate::hardware::{HardwareDataAcquisition, Hardware };
 use serde::{ Deserialize, Serialize };
 use serialport;
 use chrono::{ DateTime, Utc };
@@ -579,7 +579,7 @@ fn parse_frame_values(frame: &str, channels: &[SerialStreamChannel]) -> Result<V
     Ok(values)
 }
 
-impl HardwareDataAquisition for SerialStream {
+impl HardwareDataAcquisition for SerialStream {
     /// Take every frame the reader thread has handed over since last time.
     ///
     /// Nothing is discarded and nothing waits: an empty result means no frame

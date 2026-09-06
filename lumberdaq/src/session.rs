@@ -1,5 +1,5 @@
 use crate::device::Device;
-use crate::hardware::HardwareDataAquisition;
+use crate::hardware::HardwareDataAcquisition;
 use crate::storage::Batch;
 use crate::Error;
 use std::sync::atomic::{ AtomicBool, Ordering };

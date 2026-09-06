@@ -28,7 +28,7 @@ fn remove_at<T>(channels: &mut Vec<T>, index: usize) -> bool {
     }
 }
 
-pub trait HardwareDataAquisition {
+pub trait HardwareDataAcquisition {
     fn read(&mut self) -> Result<Vec<Vec<DataPoint>>>;
 
     /// Something wrong that is not bad enough to fail a read.
@@ -393,7 +393,7 @@ impl Hardware {
         }
     }
 }
-impl HardwareDataAquisition for Hardware {
+impl HardwareDataAcquisition for Hardware {
     fn read(&mut self) -> Result<Vec<Vec<DataPoint>>> {
         match self {
             Hardware::MockHardware(device) => device.read(),

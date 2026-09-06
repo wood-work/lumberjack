@@ -1,7 +1,7 @@
 use crate::{ Error, Result };
 use crate::channel::Channel;
 use crate::config::{ default_read_interval_ms, DeviceConfig };
-use crate::hardware::{ Hardware, HardwareDataAquisition };
+use crate::hardware::{ Hardware, HardwareDataAcquisition };
 use crate::storage::{ Batch, DataSink };
 use serde::{Deserialize, Serialize};
 use std::time::{ Duration, Instant };
