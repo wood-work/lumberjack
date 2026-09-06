@@ -238,25 +238,6 @@ pub(crate) fn config_dir() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-
-    #[test]
-    fn temporary_probe_palette() {
-        let theme = lumberjack();
-        let p = theme.extended_palette();
-        let show = |name: &str, c: iced::Color| {
-            println!("PROBE {:24} {:.3} {:.3} {:.3} a{:.2}", name, c.r, c.g, c.b, c.a)
-        };
-        show("background.base.color", p.background.base.color);
-        show("background.base.text", p.background.base.text);
-        show("background.weak.color", p.background.weak.color);
-        show("background.weak.text", p.background.weak.text);
-        show("background.strong.color", p.background.strong.color);
-        show("background.strong.text", p.background.strong.text);
-        show("background.weakest.color", p.background.weakest.color);
-        show("background.weaker.color", p.background.weaker.color);
-        println!("PROBE is_dark {}", p.is_dark);
-    }
-
     #[test]
     fn the_ordinary_step_does_not_scale() {
         assert_eq!(UserSettings::default().font_step, DEFAULT_FONT_STEP);
