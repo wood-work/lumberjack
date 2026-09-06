@@ -203,8 +203,14 @@ fn record(directory: &str) -> Result<()> {
     })?;
 
     println!("\nStopped.");
+    // Printed here rather than by the library. Where the words go is the
+    // caller's to decide, and a terminal interface or a window cannot undo a
+    // `println!` that has already happened.
     for device in daq.devices.iter() {
-        device.print_latest();
+        println!("Latest reading from device: {}", device.info.name);
+        for channel in device.channels.iter() {
+            println!("    {}", channel.latest_as_string());
+        }
     }
     Ok(())
 }

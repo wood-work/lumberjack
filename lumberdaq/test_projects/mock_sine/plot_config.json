@@ -9,10 +9,6 @@
         {
           "device": "Signal generator",
           "channel": "Sine 1Hz"
-        },
-        {
-          "device": "Arduino 1",
-          "channel": "Differential Pressure"
         }
       ]
     },

@@ -68,7 +68,10 @@ fn main() -> Result<()> {
         for channel in device.channels.iter() {
             samples += channel.datapoints.len();
         }
-        device.print_latest();
+        println!("Latest reading from device: {}", device.info.name);
+        for channel in device.channels.iter() {
+            println!("    {}", channel.latest_as_string());
+        }
     }
     println!("\n{} problems reported, {} samples still buffered", problems, samples);
     Ok(())

@@ -142,13 +142,6 @@ impl Device {
         Ok(())
     }
 
-    pub fn print_latest(&self) {
-        println!("Latest reading from device: {}", &self.info.name);
-        for channel in self.channels.iter() {
-            println!("    {}", channel.latest_as_string());
-        }
-    }
-
     pub fn is_connected(&self) -> bool {
         matches!(self.connection, ConnectionStatus::Connected)
     }
