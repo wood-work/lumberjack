@@ -15,7 +15,11 @@ chrono = "0.4"
 # they should stay sharp at every font size the settings offer. It pulls resvg
 # in, which is the cost of rendering SVG at all - the alternative is a PNG per
 # size, which is worse.
-iced = { version = "0.14", features = ["svg"] }
+# `markdown` is a feature of iced rather than a dependency of its own, and
+# brings pulldown-cmark with it. It is here for the formula help, whose
+# content is prose with headings, lists and code in it - laying that out by
+# hand meant a column of text widgets whose sizes and spacing drifted apart.
+iced = { version = "0.14", features = ["svg", "markdown"] }
 # The native folder picker. There is no answer to "choose a directory" in iced
 # or in std, and typing a path into a text field is the alternative. Used only
 # from the file menu, and only its blocking form: the dialog is modal, so the

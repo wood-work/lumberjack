@@ -11,6 +11,7 @@ mod settings;
 use crate::acquisition::*;
 use crate::look::*;
 use chrono::{DateTime, Local, Utc};
+use iced::widget::markdown;
 use iced::widget::pane_grid::{self, Axis, Configuration, PaneGrid};
 use iced::widget::{
     button, checkbox, column, container, opaque, pick_list, row, scrollable, slider, space,
@@ -179,6 +180,8 @@ fn calculated_health(config: &DaqConfig) -> Option<bool> {
         .any(|channel| channel.validate().is_err())
         .then_some(false)
 }
+
+
 
 fn devices_from(config: &DaqConfig) -> Vec<AppDevice> {
     let measured = config.devices.iter().enumerate().map(|(index, device)| AppDevice {
@@ -644,6 +647,135 @@ type Checked = Result<Vec<Answered>, String>;
 /// The error is a message rather than the error itself, because it has to
 /// cross a thread and `Error` is not `Send`.
 type Tested = (usize, Result<StreamCheck, String>);
+
+/// Which of the two formula fields the help was opened from.
+///
+/// The operators and functions are the same in both. What differs is where the
+/// values come from, which is the part somebody is actually stuck on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FormulaHelp {
+    /// A channel's scale, converting one measurement.
+    Scale,
+    /// A calculated channel's equation, combining several.
+    Equation,
+}
+
+impl FormulaHelp {
+    fn title(self) -> &'static str {
+        match self {
+            FormulaHelp::Scale => "Writing a scale",
+            FormulaHelp::Equation => "Writing an equation",
+        }
+    }
+
+    /// The help itself, as markdown.
+    ///
+    /// Written as one document rather than assembled out of text widgets. The
+    /// first attempt was the latter, and the sizes and spacings of a dozen
+    /// separate pieces drifted apart until the page read as a list of fragments
+    /// - which is exactly what a markup language exists to stop.
+    fn text(self) -> &'static str {
+        match self {
+            FormulaHelp::Scale => SCALE_HELP,
+            FormulaHelp::Equation => EQUATION_HELP,
+        }
+    }
+}
+
+/// Everything below the first heading is common to both, and deliberately
+/// repeated rather than shared: the two documents want to read as one page
+/// each, and stitching a shared tail onto a different head is how the seam
+/// starts to show.
+const SCALE_HELP: &str = r#"### What you have to work with
+
+The measurement is written `x`.
+
+Where the formula names constants — a shunt resistance, a sensor's range —
+those are available by name as well, and stay editable beside the formula
+rather than dissolving into the arithmetic.
+
+### Examples
+
+```
+x * 5 + 5
+(x - 4) / 16 * 29
+(x / shunt_ohms) * 1000
+```
+
+### Operators
+
+`+`  `-`  `*`  `/`  `%`  `^`  and brackets.
+
+`^` raises to a power, so `x ^ 2` is x squared, and `%` is the remainder after
+division. Precedence is the usual one, so `2 + 3 * 4` is 14.
+
+### Functions
+
+`sqrt`  `abs`  `round`  `floor`  `ceil`  `ln`  `log10`  `exp`  `sin`  `cos`  `tan`  `asin`  `acos`  `atan`  `min(a, b)`  `max(a, b)`  `pow(a, b)`  `log(x, base)`  `hypot(a, b)`  `atan2(y, x)`
+
+Angles are in radians. For a power, `x ^ 2` reads better than `pow(x, 2)`.
+
+### Numbers
+
+Decimals and scientific notation both: `1.5e3` is 1500, and `1e-3` is 0.001.
+
+### What is checked
+
+A formula that will not parse, or that uses a name with nothing behind it, is
+refused as you type, and the message says which names were available.
+
+One that is sound but gives an infinite or undefined answer for a particular
+reading has that reading left out and reported, rather than recorded.
+
+### What it will not do
+
+One expression giving one number. There are no comparisons, no conditionals,
+and no variables of your own."#;
+
+const EQUATION_HELP: &str = r#"### What you have to work with
+
+The inputs listed below the equation, by the short names you gave them.
+
+That is what the short names are for: channel names have spaces in them, and
+quoting those inside a formula is miserable.
+
+### Examples
+
+```
+high - low
+sqrt(dp) * 12.7
+(a + b) / 2
+```
+
+### Operators
+
+`+`  `-`  `*`  `/`  `%`  `^`  and brackets.
+
+`^` raises to a power, so `x ^ 2` is x squared, and `%` is the remainder after
+division. Precedence is the usual one, so `2 + 3 * 4` is 14.
+
+### Functions
+
+`sqrt`  `abs`  `round`  `floor`  `ceil`  `ln`  `log10`  `exp`  `sin`  `cos`  `tan`  `asin`  `acos`  `atan`  `min(a, b)`  `max(a, b)`  `pow(a, b)`  `log(x, base)`  `hypot(a, b)`  `atan2(y, x)`
+
+Angles are in radians. For a power, `x ^ 2` reads better than `pow(x, 2)`.
+
+### Numbers
+
+Decimals and scientific notation both: `1.5e3` is 1500, and `1e-3` is 0.001.
+
+### What is checked
+
+A formula that will not parse, or that uses a name with nothing behind it, is
+refused as you type, and the message says which names were available.
+
+One that is sound but gives an infinite or undefined answer for a particular
+reading has that reading left out and reported, rather than recorded.
+
+### What it will not do
+
+One expression giving one number. There are no comparisons, no conditionals,
+and no variables of your own."#;
 
 /// Which device in the setup a row of the tree stands for.
 ///
@@ -1214,6 +1346,12 @@ struct AppDaq {
     plot_menu: bool,
     /// Whether the settings dialog is up.
     settings_open: bool,
+    /// The formula help, and which field asked for it.
+    formula_help: Option<FormulaHelp>,
+    /// That help, parsed. Done when the dialog opens rather than while drawing:
+    /// the text never changes, and parsing it sixty times a second to show the
+    /// same words would be work for nothing.
+    help_items: Vec<markdown::Item>,
     /// The log as it is kept on disk, beside the one on screen.
     ///
     /// The pane holds the last couple of hundred lines and loses them when the
@@ -1373,6 +1511,8 @@ enum Message {
     RecordedChannelRemoved(usize, usize),
     SettingsOpened,
     SettingsClosed,
+    FormulaHelpOpened(FormulaHelp),
+    FormulaHelpClosed,
     AddDeviceOpened,
     AddDeviceTypeChosen(&'static str),
     AddDeviceConfirmed,
@@ -1474,6 +1614,8 @@ impl AppDaq {
             over_plot: None,
             plot_menu: false,
             settings_open: false,
+            formula_help: None,
+            help_items: Vec::new(),
             panes: default_panes(),
             plot_panes: pane_grid::State::with_configuration(Configuration::Pane(1)),
             config: empty_config(),
@@ -1968,6 +2110,17 @@ impl AppDaq {
                 self.settings_open = true;
             }
             Message::SettingsClosed => self.settings_open = false,
+            Message::FormulaHelpOpened(which) => {
+                // Reparsed on each opening rather than held from launch. It is
+                // a few microseconds against a dialog somebody is about to
+                // read, and it keeps one copy of the text rather than two.
+                self.help_items = markdown::parse(which.text()).collect();
+                self.formula_help = Some(which);
+            }
+            Message::FormulaHelpClosed => {
+                self.formula_help = None;
+                self.help_items = Vec::new();
+            }
             Message::AddDeviceOpened => {
                 // Looked up now rather than while drawing, and now is when it
                 // matters: something may have been plugged in since startup.
@@ -4580,6 +4733,7 @@ impl AppDaq {
                 Some("Written in terms of the input names below, such as (v + 1) * 2.5."),
                 &channel.equation,
                 problem,
+                Some(FormulaHelp::Equation),
                 move |equation| Message::CalculatedEquationEdited(at, equation),
             ),
             column![
@@ -4666,6 +4820,66 @@ impl AppDaq {
             .spacing(16)
             .width(320),
         )
+        .padding(20)
+        .style(dialog_style)
+        .into()
+    }
+
+    /// What can be written in a formula, and where its values come from.
+    ///
+    /// Beside the field rather than in the manual: the moment somebody wants
+    /// the list of functions is the moment they are looking at the box, and a
+    /// sentence of explanation above the field is not that list.
+    ///
+    /// Every operator and function named in these documents was tried against
+    /// the equation engine rather than taken from its documentation. A help
+    /// page listing something that does not work is worse than no help page.
+    fn formula_help_dialog(&self, which: FormulaHelp) -> Element<'_, Message> {
+        // Sizes given rather than derived. `Settings::with_text_size` makes the
+        // first heading twice the body, which on a page that is mostly headings
+        // reads as a series of titles with fragments between them.
+        let settings = markdown::Settings {
+            text_size: 13.0.into(),
+            h1_size: 16.0.into(),
+            h2_size: 15.0.into(),
+            h3_size: 14.0.into(),
+            h4_size: 13.0.into(),
+            h5_size: 13.0.into(),
+            h6_size: 13.0.into(),
+            code_size: 12.0.into(),
+            spacing: 12.0.into(),
+            style: markdown::Style::from(&self.settings.theme()),
+        };
+
+        container(
+            column![
+                row![
+                    text(which.title()).size(16),
+                    space::horizontal(),
+                    button(x().size(14))
+                        .style(button::text)
+                        .padding(2)
+                        .on_press(Message::FormulaHelpClosed),
+                ]
+                .align_y(Center),
+                scrollable(markdown::view(&self.help_items, settings).map(move |_link| {
+                    // Nothing here is a link. Reopening the help that is
+                    // already open is the honest way to spell "no message",
+                    // and needs no variant that can never be sent.
+                    Message::FormulaHelpOpened(which)
+                }))
+                // Room for the scrollbar, rather than padding pretending to be
+                // room. Without a spacing iced draws the bar *over* the
+                // content, so a right padding of ten and a bar ten wide leave
+                // the text touching it exactly.
+                .spacing(10)
+                .height(Fill),
+            ]
+            .spacing(14)
+            .width(630)
+            .height(Fill),
+        )
+        .max_height(840)
         .padding(20)
         .style(dialog_style)
         .into()
@@ -4817,7 +5031,7 @@ impl AppDaq {
         value: &'a str,
         on_input: impl Fn(String) -> Message + 'a,
     ) -> Element<'a, Message> {
-        self.rig_field_checked(label, explanation, value, None, on_input)
+        self.rig_field_checked(label, explanation, value, None, None, on_input)
     }
 
     /// The same again, saying whether what is in it will do.
@@ -4832,6 +5046,7 @@ impl AppDaq {
         explanation: Option<&'a str>,
         value: &'a str,
         problem: Option<String>,
+        help: Option<FormulaHelp>,
         on_input: impl Fn(String) -> Message + 'a,
     ) -> Element<'a, Message> {
         let style = match problem {
@@ -4844,12 +5059,33 @@ impl AppDaq {
             false => text_input(label, value).size(14).style(style),
         };
 
+        // Beside the box rather than in the paragraph above it. What somebody
+        // wants when they are stuck is the list of operators, and a sentence of
+        // explanation is not that; this is where the room for the list is.
+        //
+        // Constant per field rather than appearing and disappearing, so the
+        // shape of the tree at this position never changes and the box cannot
+        // lose the caret to it.
+        let entry: Element<'a, Message> = match help {
+            None => explaining(field.into(), problem),
+            Some(which) => row![
+                explaining(field.into(), problem),
+                button(circle_help().size(14))
+                    .style(button::text)
+                    .padding(4)
+                    .on_press(Message::FormulaHelpOpened(which)),
+            ]
+            .spacing(4)
+            .align_y(Center)
+            .into(),
+        };
+
         column![
             match explanation {
                 Some(explanation) => labelled(label, explanation),
                 None => field_label(label),
             },
-            explaining(field.into(), problem),
+            entry,
         ]
         .spacing(2)
         .into()
@@ -5446,6 +5682,7 @@ impl AppDaq {
                 ),
                 info.scale.as_ref().map(|scale| scale.equation()).unwrap_or(""),
                 problem,
+                Some(FormulaHelp::Scale),
                 move |equation| Message::ScaleEdited(device, channel, equation),
             ),
             self.rig_field("Unit", &info.unit, move |unit| {
@@ -6520,6 +6757,35 @@ impl AppDaq {
             .into(),
         };
 
+        // Above the settings dialog in the stack, because it is opened from a
+        // field behind that one is never over.
+        let screen: Element<'_, Message> = match self.formula_help {
+            None => screen,
+            Some(which) => stack![
+                screen,
+                opaque(
+                    MouseArea::new(
+                        // Centred both ways, unlike the dialogs that hold a
+                        // dropdown: those sit high because a list opens into
+                        // whatever room is below it. There is nothing here to
+                        // open, and a page of reading belongs in the middle.
+                        //
+                        // The padding is what stops it touching the edges of a
+                        // short window, since the height below is a maximum
+                        // rather than a fixed size.
+                        container(opaque(self.formula_help_dialog(which)))
+                            .width(Fill)
+                            .height(Fill)
+                            .center_x(Fill)
+                            .center_y(Fill)
+                            .padding(40)
+                    )
+                    .on_press(Message::FormulaHelpClosed)
+                ),
+            ]
+            .into(),
+        };
+
         let screen: Element<'_, Message> = match self.settings_open {
             false => screen,
             // Dismissed by clicking away as well as by the x, like the others.
@@ -6663,6 +6929,35 @@ mod tests {
         assert_eq!(calculated_health(&with_equations(&["", "v * 2"])), None);
         // One that is written and wrong still counts, whatever it sits beside.
         assert_eq!(calculated_health(&with_equations(&["", "w * 2"])), Some(false));
+    }
+
+    /// The help is markdown now, which means it can be malformed in ways a
+    /// column of text widgets could not: an unclosed fence turns the whole
+    /// page into one code block, and nothing about that fails to compile.
+    #[test]
+    fn both_help_documents_parse_into_a_page_rather_than_one_lump() {
+        for which in [FormulaHelp::Scale, FormulaHelp::Equation] {
+            let items: Vec<markdown::Item> = markdown::parse(which.text()).collect();
+
+            let headings = items
+                .iter()
+                .filter(|item| matches!(item, markdown::Item::Heading(..)))
+                .count();
+            let code = items
+                .iter()
+                .filter(|item| matches!(item, markdown::Item::CodeBlock { .. }))
+                .count();
+
+            assert!(headings >= 6, "{:?} has {} headings", which, headings);
+            // The examples. The function list is inline spans rather than a
+            // block, because a block cannot wrap and the dialog is narrow.
+            assert!(code >= 1, "{:?} has {} code blocks", which, code);
+            assert!(
+                items.len() > headings + code,
+                "{:?} is all headings and code, with no prose between them",
+                which
+            );
+        }
     }
 
     #[test]
