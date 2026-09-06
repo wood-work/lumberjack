@@ -43,7 +43,7 @@ use crate::storage::Batch;
 use crate::{ Error, Result };
 use chrono::{ DateTime, Utc };
 use serde::{ Deserialize, Serialize };
-use std::collections::{ BTreeMap, VecDeque };
+use std::collections::{ BTreeMap, BTreeSet, VecDeque };
 use std::time::Duration;
 
 
@@ -193,7 +193,7 @@ impl Calculator {
     /// Compile every equation, so a bad one is refused before a run starts
     /// rather than failing partway through.
     pub fn from_config(config: CalculatedDevice) -> Result<Calculator> {
-        Calculator::with_rates(config, &BTreeMap::new())
+        Calculator::with_rates(config, &BTreeMap::new(), &BTreeSet::new())
     }
 
     /// Build with whatever the setup says about how often each input samples.
@@ -205,11 +205,24 @@ impl Calculator {
     pub fn with_rates(
         config: CalculatedDevice,
         declared: &BTreeMap<ChannelRef, Duration>,
+        disabled: &BTreeSet<ChannelRef>,
     ) -> Result<Calculator> {
         let mut compiled = Vec::with_capacity(config.channels.len());
         let mut rates: BTreeMap<ChannelRef, Rate> = BTreeMap::new();
         for channel in config.channels.iter() {
+            // Still compiled, so a switched off channel with a broken equation
+            // is refused now rather than on the day somebody switches it on.
             let ready = compile(channel)?;
+
+            // Kept in the config and left out of the working list. A channel
+            // reading something switched off has nothing to be worked out
+            // from: leaving it in would have it hold every partial sample it
+            // ever gathered, waiting for a partner that is not coming.
+            let off = !channel.info.enabled
+                || channel.inputs.values().any(|source| disabled.contains(source));
+            if off {
+                continue;
+            }
             for (_, source) in ready.inputs.iter() {
                 rates.entry(source.clone()).or_insert_with(|| Rate {
                     declared: declared.get(source).copied(),
@@ -549,6 +562,7 @@ mod tests {
                 name: name.to_string(),
                 unit: "-".to_string(),
             scale: None,
+                enabled: true,
             },
             inputs: inputs
                 .iter()
@@ -586,6 +600,7 @@ mod tests {
                 channels: channels,
             },
             &declared,
+            &BTreeSet::new(),
         )
         .unwrap()
     }

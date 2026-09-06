@@ -88,7 +88,7 @@ impl Scale {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone)]
 /// What a channel is called and what its numbers mean.
 ///
 /// Note there is no id here. Which input a channel reads is recorded by the
@@ -119,6 +119,42 @@ pub struct ChannelInfo {
     /// those have to reconcile timestamps, which this does not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<Scale>,
+    /// Whether this channel is read at all.
+    ///
+    /// A channel that is switched off stays in the setup, keeping its name,
+    /// its binding and its scale, and simply produces nothing: nothing
+    /// recorded, nothing plotted, nothing said about it. Somewhere between
+    /// deleting it and living with it.
+    ///
+    /// Defaulted to on and left out of the file when it is, so a config that
+    /// has never heard of this reads exactly as before and one written now
+    /// only mentions the channels somebody has actually switched off.
+    #[serde(default = "on", skip_serializing_if = "is_on")]
+    pub enabled: bool,
+}
+
+/// The default for `enabled`, which serde needs as a function.
+pub(crate) fn on() -> bool {
+    true
+}
+
+/// Whether to leave `enabled` out of the file, which serde also needs as one.
+pub(crate) fn is_on(enabled: &bool) -> bool {
+    *enabled
+}
+
+impl Default for ChannelInfo {
+    /// Written out rather than derived, because a derived `bool` is `false`
+    /// and a channel that defaulted to switched off would be a trap: every
+    /// `..Default::default()` in the codebase would quietly stop recording.
+    fn default() -> ChannelInfo {
+        ChannelInfo {
+            name: String::new(),
+            unit: String::new(),
+            scale: None,
+            enabled: true,
+        }
+    }
 }
 
 pub struct Channel {
@@ -172,6 +208,7 @@ impl Channel {
                 name: name,
                 unit: unit,
                 scale: None,
+                enabled: true,
             },
             scale: None,
             datapoints: vec![],
@@ -362,6 +399,7 @@ mod tests {
             name: "Flow".to_string(),
             unit: "L/min".to_string(),
             scale: scale,
+            enabled: true,
         }
     }
 

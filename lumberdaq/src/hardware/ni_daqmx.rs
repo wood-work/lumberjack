@@ -286,6 +286,7 @@ mod tests {
                 name: format!("ai{}", number),
                 unit: "V".to_string(),
                 scale: None,
+                enabled: true,
             },
             channel: number,
             range: default_range(),

@@ -69,6 +69,10 @@ impl Daq {
             }
         }
 
+        // Worked out before the devices are moved out of the config, and
+        // before the calculator is built from what is left of it.
+        let disabled = config.disabled_inputs();
+
         let mut devices: Vec<Device> = Vec::new();
         for device_config in config.devices.into_iter() {
             devices.push(Device::from_config(device_config)?);
@@ -76,7 +80,7 @@ impl Daq {
         let mut daq = Daq::new(config.info.name, config.info.author, devices)?;
 
         if let Some(calculated) = config.calculated {
-            let calculator = Calculator::with_rates(calculated, &declared)?;
+            let calculator = Calculator::with_rates(calculated, &declared, &disabled)?;
             // An equation naming a channel nothing provides is a typo, and
             // would otherwise show up as a calculated channel that silently
             // recorded nothing for the whole run.
@@ -144,6 +148,13 @@ impl Daq {
     pub fn connect(&mut self) -> ConnectionReport {
         let mut report = ConnectionReport { connected: vec![], failed: vec![] };
         for device in self.devices.iter_mut() {
+            // Neither connected nor reported. A device that is switched off is
+            // not a device that failed, and listing it among the failures
+            // would have somebody looking for a cable that is doing nothing
+            // wrong.
+            if !device.enabled {
+                continue;
+            }
             if device.connect() {
                 report.connected.push(device.info.name.clone());
             } else {
@@ -295,6 +306,12 @@ impl Daq {
 
         thread::scope(|scope| {
             for device in devices.iter_mut() {
+                // No thread at all, rather than a thread that finds itself
+                // switched off: the device is never opened, says nothing, and
+                // costs nothing for the length of the run.
+                if !device.enabled {
+                    continue;
+                }
                 let sender = sender.clone();
                 scope.spawn(move || run_device(device, sender, stop));
             }
@@ -388,6 +405,63 @@ mod tests {
         mock_hardware::add_channel_random(&mut good, "Random".to_string()).unwrap();
         let bad = Device::new("Bad".to_string(), Hardware::None);
         Daq::new("Test".to_string(), "-".to_string(), vec![good, bad]).unwrap()
+    }
+
+    /// The promise the issue makes: a switched off device is not connected to.
+    /// A device that would plainly fail is used, so the test cannot pass by
+    /// the device merely working.
+    #[test]
+    fn a_switched_off_device_is_neither_connected_to_nor_reported_on() {
+        let mut daq = one_good_one_bad();
+        daq.devices[1].enabled = false;
+
+        let report = daq.connect();
+
+        assert_eq!(report.connected, vec!["Good".to_string()]);
+        // Not among the failures either. Switched off is not the same as
+        // broken, and listing it would send somebody after a cable that is
+        // doing nothing wrong.
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(report.all_connected(), "nothing was asked of it, so nothing failed");
+    }
+
+    /// And it produces nothing when run, which is the other half.
+    #[test]
+    fn a_switched_off_device_records_nothing() {
+        let mut good = mock_hardware::create_device("Good".to_string()).unwrap();
+        mock_hardware::add_channel_random(&mut good, "Random".to_string()).unwrap();
+        let mut off = mock_hardware::create_device("Off".to_string()).unwrap();
+        mock_hardware::add_channel_random(&mut off, "Random".to_string()).unwrap();
+        off.enabled = false;
+
+        let mut daq =
+            Daq::new("Test".to_string(), "-".to_string(), vec![good, off]).unwrap();
+        daq.connect();
+
+        // A sink that keeps the names it was offered, which is all this needs
+        // to know: a device that recorded nothing was never read.
+        struct Names(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+        impl crate::storage::DataSink for Names {
+            fn init(&mut self, _config: &DaqConfig) -> Result<()> {
+                Ok(())
+            }
+            fn write_batch(&mut self, batch: &crate::storage::Batch) -> Result<()> {
+                self.0.lock().unwrap().push(batch.device.clone());
+                Ok(())
+            }
+            fn flush(&mut self) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        daq.set_sink(Box::new(Names(std::sync::Arc::clone(&recorded)))).unwrap();
+
+        daq.run_for(Duration::from_millis(300), &mut |_| {}).unwrap();
+
+        let devices = recorded.lock().unwrap();
+        assert!(devices.iter().any(|name| name == "Good"), "the other one still records");
+        assert!(!devices.iter().any(|name| name == "Off"), "{:?}", devices);
     }
 
     #[test]

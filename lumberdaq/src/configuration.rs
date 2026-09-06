@@ -103,6 +103,7 @@ mod tests {
                 info: DeviceInfo { name: "Thermocouples".to_string() },
                 read_interval_ms: 500,
                 hardware: HardwareConfig::MockHardware(MockHardwareConfig::default()),
+                enabled: true,
             }],
             calculated: None,
         };
@@ -124,6 +125,61 @@ mod tests {
         assert_eq!(project.devices[0].read_interval_ms, 500);
         // And the library's own project details stayed behind.
         assert_eq!(project.info.name, "a project");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The issue asks for this in as many words: a config without the key
+    /// reads as enabled, and the key is not required unless something is
+    /// switched off. Both halves matter — the first so every project written
+    /// before this still loads, the second so adding the feature does not
+    /// rewrite every file with a line saying nothing changed.
+    #[test]
+    fn switched_on_is_the_default_and_is_not_written_down() {
+        let path = std::env::temp_dir().join("lumberdaq_enabled_test.json");
+        let _ = std::fs::remove_file(&path);
+
+        let config = DaqConfig {
+            info: DaqInfo { name: "a project".to_string(), author: String::new() },
+            devices: vec![DeviceConfig {
+                info: DeviceInfo { name: "Rig".to_string() },
+                read_interval_ms: 100,
+                enabled: true,
+                hardware: HardwareConfig::MockHardware(MockHardwareConfig::default()),
+            }],
+            calculated: None,
+        };
+        write_configuration_file(&path, &config).expect("it should write");
+
+        let written = std::fs::read_to_string(&path).expect("and be readable");
+        assert!(!written.contains("enabled"), "nothing is switched off:\n{}", written);
+
+        // And a file that never mentions it reads as switched on.
+        let read = read_configuration_file(&path).expect("it should read back");
+        assert!(read.devices[0].enabled);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn switching_something_off_is_written_down_and_read_back() {
+        let path = std::env::temp_dir().join("lumberdaq_disabled_test.json");
+        let _ = std::fs::remove_file(&path);
+
+        let config = DaqConfig {
+            info: DaqInfo { name: "a project".to_string(), author: String::new() },
+            devices: vec![DeviceConfig {
+                info: DeviceInfo { name: "Rig".to_string() },
+                read_interval_ms: 100,
+                enabled: false,
+                hardware: HardwareConfig::MockHardware(MockHardwareConfig::default()),
+            }],
+            calculated: None,
+        };
+        write_configuration_file(&path, &config).expect("it should write");
+
+        assert!(std::fs::read_to_string(&path).unwrap().contains("\"enabled\": false"));
+        assert!(!read_configuration_file(&path).expect("it should read").devices[0].enabled);
 
         let _ = std::fs::remove_file(&path);
     }

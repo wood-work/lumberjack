@@ -321,6 +321,7 @@ mod tests {
                     name: "Serial test device".to_string(),
                 },
                 read_interval_ms: 100,
+                enabled: true,
                 hardware: HardwareConfig::SerialStream(SerialStreamConfig {
                     port: port.to_string(),
                     baudrate: 115200,
@@ -330,6 +331,7 @@ mod tests {
                             name: "Pressure".to_string(),
                             unit: "Pa".to_string(),
                         scale: None,
+                            enabled: true,
                         },
                         index: index,
                     }],

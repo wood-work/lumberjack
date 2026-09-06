@@ -2248,6 +2248,7 @@ impl AppDaq {
                     info: lumberdaq::device::DeviceInfo { name: name.clone() },
                     read_interval_ms: lumberdaq::config::default_read_interval_ms(),
                     hardware,
+                    enabled: true,
                 });
                 // Inserted rather than pushed: the calculated device sits at
                 // the end of the tree, and a new measured device belongs
@@ -2724,6 +2725,7 @@ impl AppDaq {
                         name: unused_channel_name("New channel", &existing),
                         unit: String::new(),
                         scale: None,
+                        enabled: true,
                     },
                     inputs: std::collections::BTreeMap::new(),
                     parameters: BTreeMap::new(),

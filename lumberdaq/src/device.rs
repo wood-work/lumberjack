@@ -63,6 +63,13 @@ fn retry_due(status: &ConnectionStatus) -> bool {
 /// asking it for its `DeviceConfig`.
 pub struct Device {
     pub info: DeviceInfo,
+    /// Whether this device is used at all. See `DeviceConfig::enabled`.
+    ///
+    /// Kept on the running device as well as in the config because the running
+    /// system is what `Daq::config` writes back out, so a device that forgot
+    /// it was switched off would switch itself on again the next time the
+    /// project was saved.
+    pub enabled: bool,
     /// How often this device's thread reads it.
     pub read_interval: Duration,
     pub channels: Vec<Channel>,
@@ -78,6 +85,7 @@ impl Device {
     pub fn from_config(config: DeviceConfig) -> Result<Device> {
         let mut device = Device {
             info: config.info,
+            enabled: config.enabled,
             read_interval: Duration::from_millis(config.read_interval_ms),
             channels: vec![],
             hardware: Hardware::from_config(config.hardware)?,
@@ -96,6 +104,7 @@ impl Device {
             info: self.info.clone(),
             read_interval_ms: self.read_interval.as_millis() as u64,
             hardware: self.hardware.config(),
+            enabled: self.enabled,
         }
     }
 
@@ -115,6 +124,7 @@ impl Device {
     pub fn new(name: String, hardware: Hardware) -> Device {
         Device {
             info: DeviceInfo { name },
+            enabled: true,
             read_interval: Duration::from_millis(default_read_interval_ms()),
             channels: vec![],
             hardware: hardware,
@@ -195,7 +205,20 @@ impl Device {
 
         match self.hardware.read() {
             Ok(mut input_readings) => {
-                for (channel, datapoints) in self.channels.iter_mut().zip(input_readings.iter_mut()) {
+                for (channel, datapoints) in self.channels.iter_mut().zip(input_readings.iter_mut())
+                {
+                    // Dropped here rather than never read. The readings arrive
+                    // in the order the channels are declared, so leaving a
+                    // channel out of either list would put every reading after
+                    // it under the wrong name; the pair has to stay whole and
+                    // the unwanted one discarded at the end of it.
+                    //
+                    // Discarded rather than stored and ignored, so a channel
+                    // switched off for a fortnight does not quietly fill
+                    // memory with readings nobody will ever ask for.
+                    if !channel.info.enabled {
+                        continue;
+                    }
                     channel.add_datapoints(datapoints)?;
                 }
                 Ok(())

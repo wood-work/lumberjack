@@ -1,4 +1,4 @@
-use crate::calculated::{ CalculatedDevice, ChannelRef };
+use crate::calculated::{ CalculatedChannel, CalculatedDevice, ChannelRef };
 use crate::daq::DaqInfo;
 use crate::device::DeviceInfo;
 use crate::hardware::{ HardwareConfig, SampleRate };
@@ -34,6 +34,16 @@ pub struct DeviceConfig {
     /// its own thread so neither waits for the other.
     #[serde(default = "default_read_interval_ms", alias = "sample_interval_ms")]
     pub read_interval_ms: u64,
+    /// Whether this device is used at all.
+    ///
+    /// A device that is switched off is not connected to, not read and not
+    /// reported on. It keeps its place in the setup and every one of its
+    /// settings, so switching it back on is one click rather than typing a
+    /// port and a channel list again.
+    ///
+    /// Defaulted to on and left out of the file when it is, as a channel's is.
+    #[serde(default = "crate::channel::on", skip_serializing_if = "crate::channel::is_on")]
+    pub enabled: bool,
     pub hardware: HardwareConfig,
 }
 
@@ -99,6 +109,44 @@ pub struct DaqConfig {
 }
 
 impl DaqConfig {
+    /// Every measured channel that is switched off, as an equation names one.
+    ///
+    /// A channel of its own accord, or every channel of a device that is off:
+    /// to anything downstream those are the same thing, since neither will
+    /// produce a reading.
+    pub fn disabled_inputs(&self) -> BTreeSet<ChannelRef> {
+        let mut off = BTreeSet::new();
+
+        for device in self.devices.iter() {
+            for channel in device.hardware.channel_infos() {
+                if !device.enabled || !channel.enabled {
+                    off.insert(ChannelRef {
+                        device: device.info.name.clone(),
+                        channel: channel.name,
+                    });
+                }
+            }
+        }
+
+        off
+    }
+
+    /// Whether a calculated channel can produce anything.
+    ///
+    /// Switched off in its own right, or reading something that is. A
+    /// calculated channel is only ever as available as its inputs: one whose
+    /// source has been switched off has nothing to be worked out from, and
+    /// saying so is better than leaving it waiting for a sample that is never
+    /// coming.
+    pub fn calculated_is_enabled(&self, channel: &CalculatedChannel) -> bool {
+        if !channel.info.enabled {
+            return false;
+        }
+
+        let off = self.disabled_inputs();
+        !channel.inputs.values().any(|source| off.contains(source))
+    }
+
     /// Every measured channel, in the form an equation refers to one.
     ///
     /// What a user interface offers when someone is choosing an input for a
@@ -310,6 +358,7 @@ mod tests {
         DeviceConfig {
             info: DeviceInfo { name: name.to_string() },
             read_interval_ms: 100,
+            enabled: true,
             hardware: HardwareConfig::MockHardware(MockHardwareConfig {
                 acquisition: Default::default(),
                 channels: channels
@@ -362,6 +411,7 @@ mod tests {
                     channels: vec![],
                 },
             ),
+            enabled: true,
         }
     }
 
@@ -408,6 +458,50 @@ mod tests {
         let config = setup(vec![device("one", &["a"]), device("two", &["b"])]);
 
         assert!(config.address_clashes().is_empty());
+    }
+
+    #[test]
+    fn a_switched_off_device_takes_its_channels_with_it() {
+        // To anything downstream the two are the same: neither the device nor
+        // the channel will produce a reading.
+        let mut project = setup(vec![device("Rig", &["Flow", "Pressure"])]);
+        assert!(project.disabled_inputs().is_empty());
+
+        project.devices[0].enabled = false;
+
+        let off = project.disabled_inputs();
+        assert_eq!(off.len(), 2, "{:?}", off);
+        assert!(off.contains(&ChannelRef {
+            device: "Rig".to_string(),
+            channel: "Flow".to_string()
+        }));
+    }
+
+    #[test]
+    fn a_calculated_channel_is_off_when_what_it_reads_is_off() {
+        let project = setup(vec![device("Rig", &["Flow"])]);
+        let mut project =
+            with_calculated(project, vec![calculated("doubled", ("Rig", "Flow"))]);
+
+        let channel = project.calculated.as_ref().unwrap().channels[0].clone();
+        assert!(project.calculated_is_enabled(&channel), "everything is on");
+
+        // Switching off the measured channel switches off what reads it.
+        if let HardwareConfig::MockHardware(mock) = &mut project.devices[0].hardware {
+            mock.channels[0].info.enabled = false;
+        }
+        assert!(!project.calculated_is_enabled(&channel), "its only input is off");
+    }
+
+    #[test]
+    fn a_calculated_channel_can_be_switched_off_on_its_own() {
+        let project = setup(vec![device("Rig", &["Flow"])]);
+        let project = with_calculated(project, vec![calculated("doubled", ("Rig", "Flow"))]);
+
+        let mut channel = project.calculated.as_ref().unwrap().channels[0].clone();
+        channel.info.enabled = false;
+
+        assert!(!project.calculated_is_enabled(&channel));
     }
 
     #[test]

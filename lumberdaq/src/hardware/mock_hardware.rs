@@ -241,6 +241,7 @@ pub fn add_channel_random(device: &mut Device, name: String) -> Result<()> {
             name: name,
             unit: "-".to_string(),
         scale: None,
+            enabled: true,
         },
         MockHardwareInput::Random,
     )
@@ -253,6 +254,7 @@ pub fn add_channel_sine(device: &mut Device, name: String, frequency_hz: f64) ->
             name: name,
             unit: "-".to_string(),
         scale: None,
+            enabled: true,
         },
         MockHardwareInput::Sine { frequency_hz: frequency_hz },
     )
@@ -270,6 +272,7 @@ mod tests {
                     name: "Sine".to_string(),
                     unit: "-".to_string(),
                 scale: None,
+                    enabled: true,
                 },
                 input: MockHardwareInput::Sine { frequency_hz: frequency_hz },
             }],

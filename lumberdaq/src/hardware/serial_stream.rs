@@ -698,6 +698,7 @@ pub fn add_channel(device: &mut Device, name: String, index: i64, unit: String) 
                     name: name,
                     unit: unit,
                 scale: None,
+                    enabled: true,
                 },
                 index: index,
             });
@@ -723,6 +724,7 @@ mod tests {
                 name: format!("Channel {}", index),
                 unit: "-".to_string(),
             scale: None,
+                enabled: true,
             },
             index: *index,
         }).collect()
