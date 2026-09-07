@@ -513,7 +513,7 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "choptui"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "lumberdaq",
@@ -2246,7 +2246,7 @@ dependencies = [
 
 [[package]]
 name = "lumberdaq"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "csv",
@@ -2266,7 +2266,7 @@ dependencies = [
 
 [[package]]
 name = "lumbergui"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "iced",
@@ -2490,7 +2490,7 @@ dependencies = [
 
 [[package]]
 name = "nidaqmx"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "libloading",
 ]
@@ -3196,7 +3196,7 @@ checksum = "5be167a7af36ee22fe3115051bc51f6e6c7054c9348e28deb4f49bd6f705a315"
 
 [[package]]
 name = "picolog"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "libloading",
  "serde",
