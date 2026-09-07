@@ -223,6 +223,7 @@ pub(crate) fn start_acquisition(config: DaqConfig, directory: PathBuf) -> Acquis
                 DeviceEvent::Disconnected { device, cause } => {
                     format!("lost {}: {}", device, cause.unwrap_or_default())
                 }
+                DeviceEvent::Said { device, line } => format!("{} said: {}", device, line),
             }));
         });
 

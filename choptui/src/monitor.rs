@@ -37,6 +37,12 @@ pub enum Update {
         device: String,
         message: String,
     },
+    /// A line the device sent that was not a reading. Its own state is
+    /// untouched by it: a device that talks is not a device in trouble.
+    Said {
+        device: String,
+        line: String,
+    },
 }
 
 impl Update {
@@ -56,6 +62,7 @@ impl Update {
                 device: device,
                 message: concern.unwrap_or_else(|| "reading cleanly again".to_string()),
             },
+            DeviceEvent::Said { device, line } => Update::Said { device: device, line: line },
         }
     }
 }

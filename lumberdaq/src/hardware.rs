@@ -44,6 +44,22 @@ pub trait HardwareDataAcquisition {
     fn concern(&self) -> Option<String> {
         None
     }
+
+    /// Lines the device sent that were not readings.
+    ///
+    /// Some hardware talks. A serial instrument prints a banner when it starts,
+    /// a warning when a range is exceeded, whatever its firmware author thought
+    /// worth saying - in among the frames and in the same stream. None of it is
+    /// data: it has no channel to belong to and no value to be, so it is never
+    /// recorded. It is worth reading, though, and it used to be discarded
+    /// unseen on the way to the next frame.
+    ///
+    /// Taken rather than read, unlike `concern`: these are things that
+    /// happened rather than a state that holds, so each line is handed over
+    /// once and then gone. Most hardware says nothing, hence the default.
+    fn said(&mut self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// How a piece of hardware is described in a config file.
@@ -401,6 +417,19 @@ impl HardwareDataAcquisition for Hardware {
             Hardware::NiDaqmx(device) => device.read(),
             Hardware::SerialStream(device) => device.read(),
             Hardware::None => Err(Error::NoHardware)
+        }
+    }
+
+    fn said(&mut self) -> Vec<String> {
+        match self {
+            Hardware::SerialStream(device) => device.said(),
+            // Nothing else has anything to say. Listed rather than caught by a
+            // wildcard so that adding a talkative device makes this fail to
+            // compile rather than quietly go quiet.
+            Hardware::MockHardware(_)
+            | Hardware::PicoHrdl(_)
+            | Hardware::NiDaqmx(_)
+            | Hardware::None => Vec::new(),
         }
     }
 

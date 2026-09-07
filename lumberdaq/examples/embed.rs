@@ -59,6 +59,7 @@ fn main() -> Result<()> {
             DeviceEvent::Disconnected { device, cause } => {
                 println!("  lost {}: {}", device, cause.unwrap_or_default())
             }
+            DeviceEvent::Said { device, line } => println!("  {} said: {}", device, line),
         })
     })?;
 

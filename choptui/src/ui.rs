@@ -216,6 +216,7 @@ impl State {
             // A problem is not a disconnection: the port is fine and the device
             // keeps being read, so the status is left alone.
             Update::Problem { device, message } => self.note(format!("{}: {}", device, message)),
+            Update::Said { device, line } => self.note(format!("{} said: {}", device, line)),
         }
     }
 

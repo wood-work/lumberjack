@@ -200,6 +200,11 @@ fn record(directory: &str) -> Result<()> {
                 cause.unwrap_or_else(|| "unknown".to_string())
             );
         }
+        // Not a fault, so stdout rather than stderr: the device is working and
+        // this is it talking.
+        DeviceEvent::Said { device, line } => {
+            println!("    {} said: {}", device, line);
+        }
     })?;
 
     println!("\nStopped.");

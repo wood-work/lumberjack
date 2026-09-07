@@ -27,6 +27,16 @@ pub enum DeviceEvent {
     /// The cause is a message rather than the error, because the device keeps
     /// the original in its connection status and errors cannot be cloned.
     Disconnected { device: String, cause: Option<String> },
+    /// A line the device sent that was not a reading, passed on as it came.
+    ///
+    /// One event per line, and every one of them: unlike `Concern` there is no
+    /// state here to compare against, and no two of these say the same thing.
+    /// A device saying the same thing repeatedly is a device that is doing so,
+    /// and hiding that would be editing what it said.
+    ///
+    /// For the log and nothing else. It never reaches storage - only
+    /// `DeviceMessage::Data` does - so nothing here can land in the results.
+    Said { device: String, line: String },
 }
 
 /// What a device thread sends back. Data and events share one channel so they
@@ -92,6 +102,17 @@ pub fn run_device(device: &mut Device, sender: Sender<DeviceMessage>, stop: &Ato
         if concern.is_some() != was_troubled {
             was_troubled = concern.is_some();
             let event = DeviceEvent::Concern { device: name.clone(), concern };
+            if sender.send(DeviceMessage::Event(event)).is_err() {
+                return;
+            }
+        }
+
+        // Whatever the device said while that read was happening. Sent
+        // before the data so the log reads in the order things happened: a
+        // device that announces a range change before the readings that follow
+        // it should be seen to have done so.
+        for line in device.hardware.said() {
+            let event = DeviceEvent::Said { device: name.clone(), line: line };
             if sender.send(DeviceMessage::Event(event)).is_err() {
                 return;
             }

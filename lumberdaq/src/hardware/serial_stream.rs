@@ -135,7 +135,11 @@ pub fn check_stream(config: &SerialStreamConfig, patience: Duration) -> Result<S
         heard_bytes += arrived.len();
         buffer.push_str(&arrived);
 
-        while let Some(frame) = take_next_frame(&mut buffer, &pattern) {
+        // What the device says between frames is not this function's
+        // business: it is answering whether the settings read, and a boot
+        // banner is neither evidence for nor against.
+        while let Some(taken) = take_next_frame(&mut buffer, &pattern) {
+            let frame = taken.frame;
             frame_bytes += frame.len();
             // Strict here, where the acquisition loop is forgiving. A
             // channel pointed at a status field is a mistake to find while
@@ -315,6 +319,28 @@ struct StampedFrame {
     frame: String,
 }
 
+/// What the reader thread hands back.
+///
+/// Two things rather than one channel each, so that what a device said stays
+/// in order against the readings it said it between.
+enum FromReader {
+    Frame(StampedFrame),
+    /// A line the device sent that was not a reading: a boot banner, a debug
+    /// message, a warning in its own words.
+    ///
+    /// Worth showing somebody, which is why it travels at all rather than
+    /// being dropped where it is found, and never worth recording: it has no
+    /// channel to belong to and no value to be.
+    Said(String),
+}
+
+/// How much of one line a device says is worth keeping.
+///
+/// Long enough for anything meant to be read, short enough that a device
+/// dumping a screenful cannot push everything else out of a log that keeps a
+/// few hundred lines.
+const MAX_SAID_CHARS: usize = 200;
+
 /// The running device: its settings, and a thread reading the port.
 ///
 /// The port is not held here. It is moved into a reader thread that blocks on
@@ -333,8 +359,9 @@ pub struct SerialStream {
     /// The compiled form of `config.frame_pattern`. Compiling is not cheap, so
     /// it happens once here rather than on every read.
     frame_pattern: Regex,
-    /// Frames the reader thread has stamped and handed over.
-    frames: Option<Receiver<StampedFrame>>,
+    /// Frames the reader thread has stamped and handed over, and the lines
+    /// it found in between them.
+    frames: Option<Receiver<FromReader>>,
     /// Asks the reader thread to finish.
     stop: Arc<AtomicBool>,
     reader: Option<JoinHandle<()>>,
@@ -357,6 +384,12 @@ pub struct SerialStream {
     /// Per connection, like `unmatched` below it - what the last connection
     /// could not read says nothing about this one.
     reported: HashSet<String>,
+    /// Lines the device sent that were not readings, waiting to be collected.
+    ///
+    /// Held rather than sent straight on, because the reader thread has no way
+    /// to reach a log and this is the only place both it and the caller can
+    /// see. Emptied by `said`, so each line is reported once.
+    said: Vec<String>,
 }
 
 impl SerialStream {
@@ -388,6 +421,7 @@ impl SerialStream {
             unmatched: Arc::new(AtomicU64::new(0)),
             concern: None,
             reported: HashSet::new(),
+            said: Vec::new(),
         })
     }
 
@@ -447,6 +481,9 @@ impl DeviceInterface for SerialStream {
         self.unmatched = unmatched;
         self.concern = None;
         self.reported.clear();
+        // What the last connection said has been said. Carrying it across
+        // would report it a second time under a fresh connection.
+        self.said.clear();
         self.stop = stop;
         self.frames = Some(receiver);
         self.reader = Some(reader);
@@ -466,7 +503,7 @@ impl DeviceInterface for SerialStream {
 fn read_frames(
     mut port: Box<dyn serialport::SerialPort + Send>,
     pattern: Regex,
-    sender: Sender<StampedFrame>,
+    sender: Sender<FromReader>,
     stop: Arc<AtomicBool>,
     unmatched: Arc<AtomicU64>,
 ) {
@@ -503,12 +540,27 @@ fn read_frames(
         // arrived, so in practice it discards nothing: measured against the
         // real device, 2.3% of reads completed more than one frame.
         let mut newest: Option<String> = None;
-        while let Some(frame) = take_next_frame(&mut buffer, &pattern) {
-            newest = Some(frame);
+        while let Some(taken) = take_next_frame(&mut buffer, &pattern) {
+            // Sent whether or not the frame behind it is the one kept. What a
+            // device said does not stop being worth reading because a newer
+            // reading arrived in the same breath.
+            //
+            // Only ever reached by way of a frame that matched, which is what
+            // keeps a wrong baud rate quiet: nothing matches, so nothing is
+            // skipped to reach it, and the counting below stays the whole of
+            // the complaint. Chatter is what a *working* stream says in among
+            // its readings.
+            for line in said_lines(&taken.skipped) {
+                if sender.send(FromReader::Said(line)).is_err() {
+                    return; // nobody is listening any more
+                }
+            }
+            newest = Some(taken.frame);
         }
         if let Some(frame) = newest {
             last_frame = Instant::now();
-            if sender.send(StampedFrame { at: at, frame: frame }).is_err() {
+            let stamped = StampedFrame { at: at, frame: frame };
+            if sender.send(FromReader::Frame(stamped)).is_err() {
                 return; // nobody is listening any more
             }
         } else if last_frame.elapsed() > UNMATCHED_AFTER {
@@ -546,22 +598,54 @@ impl Drop for SerialStream {
 /// data whenever the device sent faster than we looked. Now that a thread reads
 /// the port continuously there is no reason to drop any: taking them in turn
 /// keeps every frame, in order, each with its own arrival time.
-fn take_next_frame(buffer: &mut String, pattern: &Regex) -> Option<String> {
+fn take_next_frame(buffer: &mut String, pattern: &Regex) -> Option<TakenFrame> {
     // Work out what to keep before touching the buffer, so the borrow the regex
     // holds on it has ended by the time we drain.
-    let (consumed_to, frame) = {
+    let (consumed_to, skipped, frame) = {
         let captures = pattern.captures(buffer.as_str())?;
         let whole = captures.get(0)?;
         // Group 1 is the data if the pattern names one, otherwise the whole
         // match is, which lets simple patterns skip the parentheses.
         let frame = captures.get(1).unwrap_or(whole).as_str().to_string();
-        (whole.end(), frame)
+        (whole.end(), buffer[..whole.start()].to_string(), frame)
     };
     // Everything up to the end of that match is dealt with. What follows may be
     // further complete frames or the start of one still arriving; either way it
     // stays for the next call.
     buffer.drain(..consumed_to);
-    Some(frame)
+    Some(TakenFrame { skipped: skipped, frame: frame })
+}
+
+/// A frame taken out of the buffer, and whatever sat in front of it.
+struct TakenFrame {
+    /// What was discarded to reach the frame: the line endings between frames,
+    /// and anything the device said in among them.
+    ///
+    /// Handed back rather than dropped here, because this is the only place
+    /// that ever sees it. It used to go in the bin, which is why a device's
+    /// own messages were invisible however carefully somebody watched.
+    skipped: String,
+    frame: String,
+}
+
+/// The lines worth reporting out of text that was skipped to reach a frame.
+///
+/// Usually none. What sits between two frames is a line ending and nothing
+/// else, and reporting that would fill a log with blank lines. What survives
+/// the trimming is what the device actually said.
+fn said_lines(skipped: &str) -> Vec<String> {
+    skipped
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .map(|line| match line.chars().count() > MAX_SAID_CHARS {
+            // Counted in characters rather than bytes: truncating a UTF-8
+            // string by bytes can land in the middle of one, and `String`
+            // will not hold the result.
+            true => line.chars().take(MAX_SAID_CHARS).collect::<String>() + "...",
+            false => line.to_string(),
+        })
+        .collect()
 }
 
 /// Read one frame, once per configured channel.
@@ -622,10 +706,15 @@ impl HardwareDataAcquisition for SerialStream {
         };
 
         let mut stamped: Vec<StampedFrame> = Vec::new();
+        // Collected here rather than pushed straight onto `self.said`, which
+        // the borrow above rules out: `frames` is borrowed from self for as
+        // long as this loop runs.
+        let mut said: Vec<String> = Vec::new();
         let mut reader_gone = false;
         loop {
             match frames.try_recv() {
-                Ok(frame) => stamped.push(frame),
+                Ok(FromReader::Frame(frame)) => stamped.push(frame),
+                Ok(FromReader::Said(line)) => said.push(line),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     reader_gone = true;
@@ -633,6 +722,9 @@ impl HardwareDataAcquisition for SerialStream {
                 }
             }
         }
+        // Before the check below, so that a device whose last act was to say
+        // why it was going is still heard saying it.
+        self.said.append(&mut said);
 
         // The reader only ends on a dead port. Report that, but not before
         // handing over what it managed to read first: the next call will find
@@ -677,6 +769,15 @@ impl HardwareDataAcquisition for SerialStream {
     /// as it goes past.
     fn concern(&self) -> Option<String> {
         self.concern.clone()
+    }
+
+    /// Lines the device sent that were not readings.
+    ///
+    /// Taken rather than read, unlike `concern` above it: these are things
+    /// that happened rather than a state that holds, so each is handed over
+    /// once and then gone.
+    fn said(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.said)
     }
 }
 
@@ -814,7 +915,7 @@ mod tests {
     #[test]
     fn a_spaced_frame_reads_the_same_as_a_tight_one() {
         let mut buffer = String::from("#241.9, 0.085, 0, 0, 0, LO, 0, 4, 0$");
-        let frame = take_next_frame(&mut buffer, &default_pattern()).expect("one whole frame");
+        let frame = next_frame(&mut buffer, &default_pattern()).expect("one whole frame");
         assert_eq!(read_values(&frame, &[0, 1]), vec![241.9, 0.085]);
     }
 
@@ -842,37 +943,116 @@ mod tests {
         Regex::new(&default_frame_pattern()).unwrap()
     }
 
+    /// The frame alone, for the tests that are not about what preceded it.
+    fn next_frame(buffer: &mut String, pattern: &Regex) -> Option<String> {
+        take_next_frame(buffer, pattern).map(|taken| taken.frame)
+    }
+
+    /// The device's own messages, which used to be dropped on the way to the
+    /// next frame and so could not be seen at all.
+    #[test]
+    fn what_a_device_says_before_a_frame_is_handed_back() {
+        let mut buffer = String::from("ADC calibrated\r\n#1,2.00$");
+        let taken = take_next_frame(&mut buffer, &default_pattern()).expect("a frame");
+
+        assert_eq!(taken.frame, "1,2.00");
+        assert_eq!(said_lines(&taken.skipped), vec!["ADC calibrated".to_string()]);
+    }
+
+    /// What sits between two frames is a line ending and nothing else. A log
+    /// with a blank line in it for every reading would be no log at all.
+    #[test]
+    fn the_gap_between_two_frames_is_not_worth_reporting() {
+        let mut buffer = String::from("#1,2.00$\r\n#1,3.00$");
+        let first = take_next_frame(&mut buffer, &default_pattern()).expect("a frame");
+        let second = take_next_frame(&mut buffer, &default_pattern()).expect("another");
+
+        assert!(said_lines(&first.skipped).is_empty());
+        assert!(said_lines(&second.skipped).is_empty(), "a line ending is not a message");
+        assert_eq!(second.frame, "1,3.00");
+    }
+
+    #[test]
+    fn several_lines_at_once_are_reported_one_by_one() {
+        let skipped = "starting up\r\nrange set to 20 mA\r\n";
+        assert_eq!(said_lines(skipped), vec![
+            "starting up".to_string(),
+            "range set to 20 mA".to_string(),
+        ]);
+    }
+
+    /// A device dumping a screenful should not push everything else out of a
+    /// log that keeps a few hundred lines.
+    #[test]
+    fn a_very_long_line_is_cut_short() {
+        let long = "x".repeat(MAX_SAID_CHARS + 50);
+        let said = said_lines(&long);
+
+        assert_eq!(said.len(), 1);
+        assert!(said[0].ends_with("..."), "it should say it was cut");
+        assert_eq!(said[0].chars().count(), MAX_SAID_CHARS + 3);
+    }
+
+    /// The whole reason the wrong baud rate stays quiet. Nothing is skipped
+    /// except to reach a frame, so a stream where nothing matches has nothing
+    /// to say - it has a concern instead, which is the honest answer.
+    #[test]
+    fn a_stream_with_no_frames_in_it_says_nothing() {
+        let noise = "\u{fffd}\u{fffd}garbage at the wrong rate\u{fffd}\u{fffd}";
+        let mut buffer = String::from(noise);
+        assert!(take_next_frame(&mut buffer, &default_pattern()).is_none());
+        assert_eq!(buffer, noise, "and none of it is thrown away either");
+    }
+
+    #[test]
+    fn what_a_device_says_is_collected_by_reading_and_handed_over_once() {
+        let mut device = unattached(&[0, 1]);
+        let (sender, receiver) = mpsc::channel();
+        sender.send(FromReader::Said("ADC calibrated".to_string())).expect("receiver is here");
+        let stamped = StampedFrame { at: Utc::now(), frame: "1,2".to_string() };
+        sender.send(FromReader::Frame(stamped)).expect("receiver is here");
+        device.frames = Some(receiver);
+        let _sender = sender;
+
+        let readings = device.read().expect("a successful read");
+        assert_eq!(readings[0].len(), 1, "a line of chatter is not a reading");
+        assert!(device.concern().is_none(), "a device that talks is not a device in trouble");
+
+        assert_eq!(device.said(), vec!["ADC calibrated".to_string()]);
+        assert!(device.said().is_empty(), "handed over once, and then gone");
+    }
+
     /// The behaviour this replaced took the last frame and dropped the rest.
     /// Every frame now comes out, in order, and the partial one is kept.
     #[test]
     fn frames_come_out_in_order_and_none_are_dropped() {
         let mut buffer = String::from("#1,2.00$#1,3.00$#1,4.0");
         let pattern = default_pattern();
-        assert_eq!(take_next_frame(&mut buffer, &pattern).unwrap(), "1,2.00");
-        assert_eq!(take_next_frame(&mut buffer, &pattern).unwrap(), "1,3.00");
-        assert!(take_next_frame(&mut buffer, &pattern).is_none());
+        assert_eq!(next_frame(&mut buffer, &pattern).unwrap(), "1,2.00");
+        assert_eq!(next_frame(&mut buffer, &pattern).unwrap(), "1,3.00");
+        assert!(next_frame(&mut buffer, &pattern).is_none());
         assert_eq!(buffer, "#1,4.0");
     }
 
     #[test]
     fn an_incomplete_frame_yields_nothing_and_is_kept() {
         let mut buffer = String::from("#1,2.0");
-        assert!(take_next_frame(&mut buffer, &default_pattern()).is_none());
+        assert!(next_frame(&mut buffer, &default_pattern()).is_none());
         assert_eq!(buffer, "#1,2.0");
     }
 
     #[test]
     fn a_frame_split_across_two_reads_is_rejoined() {
         let mut buffer = String::from("#1,2.");
-        assert!(take_next_frame(&mut buffer, &default_pattern()).is_none());
+        assert!(next_frame(&mut buffer, &default_pattern()).is_none());
         buffer.push_str("00,3$");
-        assert_eq!(take_next_frame(&mut buffer, &default_pattern()).unwrap(), "1,2.00,3");
+        assert_eq!(next_frame(&mut buffer, &default_pattern()).unwrap(), "1,2.00,3");
     }
 
     #[test]
     fn noise_before_a_frame_is_discarded() {
         let mut buffer = String::from("garbage#1,2.00$");
-        assert_eq!(take_next_frame(&mut buffer, &default_pattern()).unwrap(), "1,2.00");
+        assert_eq!(next_frame(&mut buffer, &default_pattern()).unwrap(), "1,2.00");
     }
 
     /// A device with no framing characters at all, just newline terminated
@@ -881,8 +1061,8 @@ mod tests {
     fn a_newline_terminated_device_needs_only_a_different_pattern() {
         let pattern = Regex::new(r"([^\r\n]+)\r?\n").unwrap();
         let mut buffer = String::from("1,2.00\r\n1,3.00\r\n1,4.0");
-        assert_eq!(take_next_frame(&mut buffer, &pattern).unwrap(), "1,2.00");
-        assert_eq!(take_next_frame(&mut buffer, &pattern).unwrap(), "1,3.00");
+        assert_eq!(next_frame(&mut buffer, &pattern).unwrap(), "1,2.00");
+        assert_eq!(next_frame(&mut buffer, &pattern).unwrap(), "1,3.00");
         assert_eq!(buffer, "1,4.0");
     }
 
@@ -892,7 +1072,7 @@ mod tests {
     fn a_pattern_without_a_capture_group_uses_the_whole_match() {
         let pattern = Regex::new(r"[0-9.,]+;").unwrap();
         let mut buffer = String::from("1,2.00;1,3.00;");
-        assert_eq!(take_next_frame(&mut buffer, &pattern).unwrap(), "1,2.00;");
+        assert_eq!(next_frame(&mut buffer, &pattern).unwrap(), "1,2.00;");
     }
 
     /// Devices that wrap data in something more than one character, here a
@@ -901,7 +1081,7 @@ mod tests {
     fn a_pattern_can_strip_more_than_delimiters() {
         let pattern = Regex::new(r"\$DATA,([^*]*)\*[0-9A-F]{2}\r\n").unwrap();
         let mut buffer = String::from("$DATA,1,2.00,3*7F\r\n");
-        assert_eq!(take_next_frame(&mut buffer, &pattern).unwrap(), "1,2.00,3");
+        assert_eq!(next_frame(&mut buffer, &pattern).unwrap(), "1,2.00,3");
     }
 
     /// A failed connection must leave nothing behind that looks connected: no
@@ -982,12 +1162,11 @@ mod tests {
     /// Put frames in front of a device as though a reader thread had. The
     /// sender is returned so it stays alive: dropping it would look like the
     /// reader ending, which is a different thing entirely.
-    fn hand_over(device: &mut SerialStream, frames: &[&str]) -> Sender<StampedFrame> {
+    fn hand_over(device: &mut SerialStream, frames: &[&str]) -> Sender<FromReader> {
         let (sender, receiver) = mpsc::channel();
         for frame in frames {
-            sender
-                .send(StampedFrame { at: Utc::now(), frame: frame.to_string() })
-                .expect("the receiver is right here");
+            let stamped = StampedFrame { at: Utc::now(), frame: frame.to_string() };
+            sender.send(FromReader::Frame(stamped)).expect("the receiver is right here");
         }
         device.frames = Some(receiver);
         sender
