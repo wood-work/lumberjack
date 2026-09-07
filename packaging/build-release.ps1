@@ -27,6 +27,15 @@ try {
     $version = ($manifest | Select-String '^version = "(.+)"').Matches[0].Groups[1].Value
     Write-Host "lumberjack $version"
 
+    # Asked rather than assumed. `target/` is only the default: a machine can
+    # move it with CARGO_TARGET_DIR or build.target-dir in .cargo/config.toml,
+    # and this one does - OneDrive marks synced directories read-only, which
+    # some build scripts refuse to write into. Guessing wrong here fails after
+    # a three minute build rather than before it.
+    $metadata = cargo metadata --format-version 1 --no-deps | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) { throw "cargo metadata failed" }
+    $target = $metadata.target_directory
+
     $dirty = git status --porcelain
     if ($dirty) {
         Write-Warning "The working tree has uncommitted changes. A zip built from one cannot be rebuilt from its tag."
@@ -46,23 +55,23 @@ try {
         return [BitConverter]::ToUInt16($bytes, $pe + 24 + 68)
     }
 
-    $gui = Get-Subsystem "target/release/lumbergui.exe"
+    $gui = Get-Subsystem "$target/release/lumbergui.exe"
     if ($gui -ne 2) { throw "lumbergui is subsystem $gui; it should be 2, or it will open a console window" }
-    $tui = Get-Subsystem "target/release/choptui.exe"
+    $tui = Get-Subsystem "$target/release/choptui.exe"
     if ($tui -ne 3) { throw "choptui is subsystem $tui; it should be 3, being a terminal interface" }
     Write-Host "  subsystems: lumbergui $gui (windowed), choptui $tui (console)"
 
     # Everything that goes out, named in one place so nothing is left behind by
     # being remembered rather than listed.
     $contents = @(
-        'target/release/lumbergui.exe',
-        'target/release/choptui.exe',
+        "$target/release/lumbergui.exe",
+        "$target/release/choptui.exe",
         'README.md',
         'LICENSE',
         'packaging/RUNNING.txt'
     )
 
-    $staging = "target/package/lumberjack-$version"
+    $staging = "$target/package/lumberjack-$version"
     if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
     New-Item -ItemType Directory -Path $staging -Force | Out-Null
     foreach ($item in $contents) {
@@ -70,7 +79,7 @@ try {
         Copy-Item $item $staging
     }
 
-    $zip = "target/package/lumberjack-$version-windows-x86_64.zip"
+    $zip = "$target/package/lumberjack-$version-windows-x86_64.zip"
     if (Test-Path $zip) { Remove-Item $zip }
     Compress-Archive -Path "$staging/*" -DestinationPath $zip -CompressionLevel Optimal
 
