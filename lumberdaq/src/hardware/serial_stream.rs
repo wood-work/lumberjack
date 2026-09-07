@@ -7,6 +7,7 @@ use serde::{ Deserialize, Serialize };
 use serialport;
 use chrono::{ DateTime, Utc };
 use regex::Regex;
+use std::collections::{ BTreeMap, HashSet };
 use std::io::Read;
 use std::sync::atomic::{ AtomicBool, AtomicU64, Ordering };
 use std::sync::mpsc::{ self, Receiver, Sender, TryRecvError };
@@ -136,11 +137,19 @@ pub fn check_stream(config: &SerialStreamConfig, patience: Duration) -> Result<S
 
         while let Some(frame) = take_next_frame(&mut buffer, &pattern) {
             frame_bytes += frame.len();
-            match parse_frame_values(&frame, &config.channels) {
+            // Strict here, where the acquisition loop is forgiving. A
+            // channel pointed at a status field is a mistake to find while
+            // the indices are being chosen, not one to discover later as a
+            // trace with holes in it, so one channel that cannot read its
+            // field is enough to fail the check.
+            match parse_frame_values(&frame, &config.channels)
+                .iter()
+                .find_map(|outcome| outcome.as_ref().err())
+            {
                 // One frame that reads settles it. Holding the port for the
                 // rest of the patience would prove nothing further.
-                Ok(_) => return Ok(StreamCheck::Reads),
-                Err(error) => {
+                None => return Ok(StreamCheck::Reads),
+                Some(error) => {
                     mismatch.get_or_insert_with(|| error.to_string());
                 }
             }
@@ -338,6 +347,16 @@ pub struct SerialStream {
     /// State rather than an event, so an interface can show it for as long as
     /// it is true. Refreshed by every read and cleared by the first clean one.
     concern: Option<String>,
+    /// Channels already complained about, by name.
+    ///
+    /// A channel pointed at a field that never holds a number is worth saying
+    /// once. Saying it again on every batch for the rest of the run is not: the
+    /// complaint has not changed, and a channel that alternates between a
+    /// number and `LO` would otherwise raise and clear the same one all day.
+    ///
+    /// Per connection, like `unmatched` below it - what the last connection
+    /// could not read says nothing about this one.
+    reported: HashSet<String>,
 }
 
 impl SerialStream {
@@ -368,6 +387,7 @@ impl SerialStream {
             reader: None,
             unmatched: Arc::new(AtomicU64::new(0)),
             concern: None,
+            reported: HashSet::new(),
         })
     }
 
@@ -426,6 +446,7 @@ impl DeviceInterface for SerialStream {
 
         self.unmatched = unmatched;
         self.concern = None;
+        self.reported.clear();
         self.stop = stop;
         self.frames = Some(receiver);
         self.reader = Some(reader);
@@ -543,40 +564,49 @@ fn take_next_frame(buffer: &mut String, pattern: &Regex) -> Option<String> {
     Some(frame)
 }
 
-/// Split one frame into a value per configured channel.
+/// Read one frame, once per configured channel.
 ///
 /// The returned Vec is in the same order as `channels`, because `Device::read`
 /// pairs it against the device's channels positionally. Both come from this one
 /// list, so they cannot fall out of step.
 ///
+/// A result per channel rather than one for the whole frame. The channels are
+/// independent, so a field that will not read says nothing about the field next
+/// to it: `241.9, 0.085, 0, 0, 0, LO, 0, 4, 0` has eight numbers in it and one
+/// status word. Failing the frame on the first unreadable field threw away all
+/// eight, which is a hole across every channel rather than the one missing
+/// value the stream actually justifies.
+///
 /// Values rather than datapoints, because one frame contributes one value to
 /// each channel and the caller holds the timestamp that applies to all of them.
-fn parse_frame_values(frame: &str, channels: &[SerialStreamChannel]) -> Result<Vec<f64>> {
+fn parse_frame_values(frame: &str, channels: &[SerialStreamChannel]) -> Vec<Result<f64>> {
+    // Trimmed because a device is as entitled to write `241.9, 0.085` as it is
+    // to write `241.9,0.085`, and they mean the same thing.
     let fields: Vec<&str> = frame.split(FIELD_SEPARATOR).map(|field| field.trim()).collect();
-    let mut values: Vec<f64> = Vec::with_capacity(channels.len());
 
-    for channel in channels.iter() {
-        let position = usize::try_from(channel.index).map_err(|_| {
-            Error::NegativeChannelIndex {
+    channels
+        .iter()
+        .map(|channel| {
+            let position = usize::try_from(channel.index).map_err(|_| {
+                Error::NegativeChannelIndex {
+                    channel: channel.info.name.clone(),
+                    index: channel.index,
+                }
+            })?;
+            let field = fields.get(position).ok_or_else(|| Error::FrameTooShort {
                 channel: channel.info.name.clone(),
                 index: channel.index,
-            }
-        })?;
-        let field = fields.get(position).ok_or_else(|| Error::FrameTooShort {
-            channel: channel.info.name.clone(),
-            index: channel.index,
-            fields: fields.len(),
-            frame: frame.to_string(),
-        })?;
-        let value: f64 = field.parse().map_err(|_| Error::FieldNotNumeric {
-            channel: channel.info.name.clone(),
-            index: channel.index,
-            field: field.to_string(),
-            frame: frame.to_string(),
-        })?;
-        values.push(value);
-    }
-    Ok(values)
+                fields: fields.len(),
+                frame: frame.to_string(),
+            })?;
+            field.parse().map_err(|_| Error::FieldNotNumeric {
+                channel: channel.info.name.clone(),
+                index: channel.index,
+                field: field.to_string(),
+                frame: frame.to_string(),
+            })
+        })
+        .collect()
 }
 
 impl HardwareDataAcquisition for SerialStream {
@@ -612,31 +642,31 @@ impl HardwareDataAcquisition for SerialStream {
         }
 
         let mut readings: Vec<Vec<DataPoint>> = vec![Vec::new(); self.config.channels.len()];
-        let mut skipped = 0usize;
-        let mut reason: Option<String> = None;
+        // Which channels could not read their field, and the first reason each
+        // gave. Keyed by channel so a batch of a thousand frames complains
+        // about a status field once rather than a thousand times, and ordered
+        // so the same batch always produces the same complaint.
+        let mut unreadable: BTreeMap<usize, String> = BTreeMap::new();
 
         for frame in stamped.iter() {
-            match parse_frame_values(&frame.frame, &self.config.channels) {
-                Ok(values) => {
-                    for (index, value) in values.iter().enumerate() {
-                        readings[index].push(DataPoint { datetime: frame.at, value: *value });
+            let outcomes = parse_frame_values(&frame.frame, &self.config.channels);
+            for (index, outcome) in outcomes.into_iter().enumerate() {
+                match outcome {
+                    Ok(value) => {
+                        readings[index].push(DataPoint { datetime: frame.at, value });
                     }
-                }
-                // A frame the pattern let through that the channels cannot
-                // read. Dropping just this one keeps the rest of the batch,
-                // which is the whole point: a device that prints a status
-                // line every minute should not punch a hole in a recording.
-                //
-                // Only the first reason is kept. A hundred identical
-                // complaints from one batch say no more than one does.
-                Err(error) => {
-                    skipped += 1;
-                    reason.get_or_insert_with(|| error.to_string());
+                    // Only this channel loses this sample; the rest of the
+                    // frame is good and is kept. A device that reports `LO` in
+                    // one field should cost that one channel one reading, not
+                    // punch a hole across every channel it sends.
+                    Err(error) => {
+                        unreadable.entry(index).or_insert_with(|| error.to_string());
+                    }
                 }
             }
         }
 
-        self.concern = self.what_is_wrong(skipped, stamped.len(), reason);
+        self.concern = self.what_is_wrong(&unreadable, stamped.len());
         Ok(readings)
     }
 
@@ -651,36 +681,64 @@ impl HardwareDataAcquisition for SerialStream {
 }
 
 impl SerialStream {
-    /// Judge one read: what came out of it, and what the reader made of the
-    /// bytes it could not use.
+    /// Judge one read: what could not be read in it, and what the reader made
+    /// of the bytes it could not use.
+    ///
+    /// Each channel is complained about once. The complaint stands while the
+    /// channel keeps failing, so an interface still shows what is wrong, but it
+    /// is only ever *raised* once: a status field that never holds a number is
+    /// not news after the first batch, and one that holds a number half the
+    /// time would otherwise raise and clear the same complaint all day.
+    ///
+    /// Takes `&mut self` for that reason - remembering what has already been
+    /// said is the whole of it.
     fn what_is_wrong(
-        &self,
-        skipped: usize,
+        &mut self,
+        unreadable: &BTreeMap<usize, String>,
         frames: usize,
-        reason: Option<String>,
     ) -> Option<String> {
         // Taken rather than read, so each bufferful of noise is counted once.
         let unmatched = self.unmatched.swap(0, Ordering::Relaxed);
 
-        match (skipped, unmatched, frames) {
-            // Frames are arriving and some of them cannot be read.
-            (1.., _, _) => Some(format!(
-                "skipping frames that do not fit the channels: {}",
-                reason.unwrap_or_else(|| "unreadable".to_string())
-            )),
+        // Note every channel that failed, and keep the reason from the first
+        // one not mentioned before. All of them are noted whether or not they
+        // are the one reported, so each channel costs one complaint rather than
+        // one per batch until they have each had a turn.
+        let mut fresh: Option<String> = None;
+        for (index, reason) in unreadable.iter() {
+            let name = match self.config.channels.get(*index) {
+                Some(channel) => channel.info.name.clone(),
+                None => continue,
+            };
+            // `insert` answers true the first time this channel is seen.
+            if self.reported.insert(name) && fresh.is_none() {
+                fresh = Some(reason.clone());
+            }
+        }
+
+        match (fresh, unreadable.is_empty(), unmatched, frames) {
+            // A channel that has not been mentioned before cannot read its
+            // field. This is the one time it gets said.
+            (Some(reason), _, _, _) => {
+                Some(format!("dropping the samples it cannot read: {}", reason))
+            }
             // Or bytes are arriving and none of them are frames at all, which
             // is what a wrong baud rate looks like from here. It is also what
             // a wrong frame pattern looks like, so say both.
-            (0, 1.., _) => Some(format!(
+            (None, _, 1.., _) => Some(format!(
                 "reading {} but nothing matches the frame pattern - check the baud rate",
                 self.config.port
             )),
+            // Channels still failing, all of them already mentioned. What was
+            // said stands - it is still true - but saying it again is the
+            // noise this is here to avoid.
+            (None, false, 0, _) => self.concern.clone(),
             // A batch that arrived and read cleanly settles it.
-            (0, 0, 1..) => None,
+            (None, true, 0, 1..) => None,
             // An empty batch says nothing either way: it is what draining
             // faster than the device sends looks like. Leave the last answer
             // standing rather than treating silence as good news.
-            (0, 0, 0) => self.concern.clone(),
+            (None, true, 0, 0) => self.concern.clone(),
         }
     }
 }
@@ -730,24 +788,54 @@ mod tests {
         }).collect()
     }
 
+    /// The values from a frame that is expected to read completely.
+    fn read_values(frame: &str, indices: &[i64]) -> Vec<f64> {
+        parse_frame_values(frame, &line_inputs(indices))
+            .into_iter()
+            .map(|outcome| outcome.expect("every field here is a number"))
+            .collect()
+    }
+
     #[test]
     fn reads_the_configured_indices_in_order() {
-        let values = parse_frame_values(EXAMPLE, &line_inputs(&[1, 3])).unwrap();
-        assert_eq!(values, vec![2.00, 1.0]);
+        assert_eq!(read_values(EXAMPLE, &[1, 3]), vec![2.00, 1.0]);
+    }
+
+    /// Plenty of devices space their fields out: `241.9, 0.085, 0` is the same
+    /// frame as `241.9,0.085,0` and has to read as one.
+    #[test]
+    fn a_space_after_the_comma_is_not_part_of_the_value() {
+        let spaced = "241.9, 0.085, 0, 0, 0, LO, 0, 4, 0";
+        assert_eq!(read_values(spaced, &[0, 1, 7]), vec![241.9, 0.085, 4.0]);
+    }
+
+    /// The whole of it, as the device sends it: markers stripped by the
+    /// pattern, spaces by the parse.
+    #[test]
+    fn a_spaced_frame_reads_the_same_as_a_tight_one() {
+        let mut buffer = String::from("#241.9, 0.085, 0, 0, 0, LO, 0, 4, 0$");
+        let frame = take_next_frame(&mut buffer, &default_pattern()).expect("one whole frame");
+        assert_eq!(read_values(&frame, &[0, 1]), vec![241.9, 0.085]);
     }
 
     #[test]
-    fn a_non_numeric_field_is_rejected() {
-        // Index 5 is "STBY". Leaving it out of the config is how you skip it.
-        let result = parse_frame_values(EXAMPLE, &line_inputs(&[5]));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("STBY"));
+    fn a_non_numeric_field_fails_its_own_channel_and_no_other() {
+        // Index 5 is "STBY". The channels either side of it are numbers and
+        // have nothing wrong with them, so they still read.
+        let outcomes = parse_frame_values(EXAMPLE, &line_inputs(&[1, 5, 3]));
+
+        assert_eq!(*outcomes[0].as_ref().expect("index 1 is a number"), 2.00);
+        assert_eq!(*outcomes[2].as_ref().expect("index 3 is a number"), 1.0);
+
+        let error = outcomes[1].as_ref().expect_err("index 5 is STBY");
+        assert!(error.to_string().contains("STBY"), "{}", error);
     }
 
     #[test]
-    fn an_index_past_the_end_of_the_frame_is_rejected() {
-        let result = parse_frame_values(EXAMPLE, &line_inputs(&[99]));
-        assert!(result.is_err());
+    fn an_index_past_the_end_of_the_frame_fails_only_that_channel() {
+        let outcomes = parse_frame_values(EXAMPLE, &line_inputs(&[1, 99]));
+        assert_eq!(*outcomes[0].as_ref().expect("index 1 is a number"), 2.00);
+        assert!(outcomes[1].is_err());
     }
 
     fn default_pattern() -> Regex {
@@ -873,8 +961,8 @@ mod tests {
     /// channel each value landed in. Now the name travels with the index.
     #[test]
     fn reordering_channels_moves_their_bindings_with_them() {
-        let forwards = parse_frame_values(EXAMPLE, &line_inputs(&[1, 3])).unwrap();
-        let backwards = parse_frame_values(EXAMPLE, &line_inputs(&[3, 1])).unwrap();
+        let forwards = read_values(EXAMPLE, &[1, 3]);
+        let backwards = read_values(EXAMPLE, &[3, 1]);
         assert_eq!(forwards[0], backwards[1]);
         assert_eq!(forwards[1], backwards[0]);
     }
@@ -920,16 +1008,82 @@ mod tests {
         assert_eq!(readings[1][1].value, 4.0);
     }
 
+    /// What the frame-at-a-time version got wrong: one field it could not read
+    /// threw away the whole frame, so a device reporting `LO` in field two put
+    /// a hole in field one as well. Only the field that cannot be read is lost.
     #[test]
-    fn skipping_a_frame_is_something_the_device_says_rather_than_swallows() {
-        // Skipping silently would turn a misconfigured index into no data and
+    fn one_unreadable_field_does_not_cost_the_channels_beside_it() {
+        let mut device = unattached(&[0, 1]);
+        let _sender = hand_over(&mut device, &["1,LO", "3,4"]);
+
+        let readings = device.read().expect("a field it cannot read is not a failed read");
+
+        assert_eq!(readings[0].len(), 2, "the good field of a mixed frame survives");
+        assert_eq!(readings[0][0].value, 1.0);
+        assert_eq!(readings[0][1].value, 3.0);
+
+        assert_eq!(readings[1].len(), 1, "only the channel on LO loses a sample");
+        assert_eq!(readings[1][0].value, 4.0);
+    }
+
+    #[test]
+    fn dropping_a_sample_is_something_the_device_says_rather_than_swallows() {
+        // Dropping silently would turn a misconfigured index into no data and
         // no explanation, which is worse than the error it replaced.
         let mut device = unattached(&[0, 1]);
         let _sender = hand_over(&mut device, &["1,2", "STBY,none"]);
 
         device.read().expect("still a successful read");
         let concern = device.concern().expect("it should have something to say");
-        assert!(concern.contains("skipping frames"), "{}", concern);
+        assert!(concern.contains("dropping"), "{}", concern);
+        assert!(concern.contains("STBY"), "{}", concern);
+    }
+
+    /// Said once. A channel pointed at a status field would otherwise complain
+    /// on every batch for as long as the run lasts, and one that alternates
+    /// between a number and `LO` would raise and clear the same complaint all
+    /// day - which in an interface is a warning that will not sit still.
+    #[test]
+    fn a_channel_is_complained_about_once_and_then_left_alone() {
+        let mut device = unattached(&[0, 1]);
+
+        let _first = hand_over(&mut device, &["1,LO"]);
+        device.read().expect("a successful read");
+        let raised = device.concern().expect("the first one is worth saying");
+        assert!(raised.contains("LO"), "{}", raised);
+
+        // Still failing, and already mentioned: the complaint stands rather
+        // than being renewed, so an interface has something to show.
+        let _still = hand_over(&mut device, &["2,LO"]);
+        device.read().expect("a successful read");
+        assert_eq!(device.concern(), Some(raised));
+
+        // A clean batch settles it, as it always did.
+        let _clean = hand_over(&mut device, &["1,2"]);
+        device.read().expect("a successful read");
+        assert!(device.concern().is_none(), "a clean batch should clear it");
+
+        // And the same channel failing again is not news.
+        let _again = hand_over(&mut device, &["1,LO"]);
+        device.read().expect("a successful read");
+        assert!(device.concern().is_none(), "the same complaint is not raised twice");
+    }
+
+    /// Each channel gets its own turn, though. Two channels failing is two
+    /// different things wrong, and the second is not covered by the first.
+    #[test]
+    fn a_second_channel_going_wrong_is_still_worth_saying() {
+        let mut device = unattached(&[0, 1]);
+
+        let _first = hand_over(&mut device, &["1,LO"]);
+        device.read().expect("a successful read");
+        let about_one = device.concern().expect("the first one is worth saying");
+
+        let _second = hand_over(&mut device, &["HI,LO"]);
+        device.read().expect("a successful read");
+        let about_both = device.concern().expect("the second one is too");
+        assert_ne!(about_both, about_one, "a different channel is a different complaint");
+        assert!(about_both.contains("HI"), "{}", about_both);
     }
 
     #[test]
